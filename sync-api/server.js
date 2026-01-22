@@ -2829,7 +2829,7 @@ app.post('/api/subscription-requests', optionalAuthenticate, async (req, res) =>
 app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
   try {
     const {
-      firebaseUid,
+      firebaseUid, // ✅ اختياري - الخادم يستخرجه من authToken إذا كان متاحاً
       token,
       deviceModel,
       deviceBrand,
@@ -2838,7 +2838,7 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
       appVersionCode
     } = req.body;
 
-    console.log(`📥 استقبال طلب تسجيل FCM token: firebaseUid=${firebaseUid}, token=${token?.substring(0, 20)}...`);
+    console.log(`📥 استقبال طلب تسجيل FCM token: token=${token?.substring(0, 20)}..., hasAuth=${!!req.user}`);
 
     // ✅ Input Validation
     if (!token) {
@@ -2851,10 +2851,15 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
       return res.status(400).json({ success: false, error: 'token غير صحيح' });
     }
 
-    // ✅ Security: إذا كان المستخدم مصادقاً، استخدم firebaseUid من token
+    // 🏗️ التصميم المعماري: الخادم هو مصدر الحقيقة
+    // ✅ إذا كان المستخدم مصادقاً (authToken موجود)، استخدم firebaseUid من JWT token
+    // ✅ إذا لم يكن مصادقاً، استخدم firebaseUid من body (للتوافق مع الطلبات القديمة)
     let finalFirebaseUid = firebaseUid;
     if (req.user && req.user.firebaseUid) {
+      // ✅ الخادم هو مصدر الحقيقة: firebaseUid من authToken (JWT)
       finalFirebaseUid = req.user.firebaseUid;
+      console.log(`✅ [FCM] Using firebaseUid from authToken (JWT): ${finalFirebaseUid}`);
+      
       // ✅ Security: التحقق من أن المستخدم لا يسجل token لمستخدم آخر
       if (firebaseUid && firebaseUid !== req.user.firebaseUid) {
         console.log(`⚠️ Security: User ${req.user.firebaseUid} attempted to register token for ${firebaseUid}`);
@@ -2863,10 +2868,15 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
           error: 'ليس لديك صلاحية لتسجيل token لمستخدم آخر' 
         });
       }
-    }
-
-    if (!finalFirebaseUid) {
-      return res.status(400).json({ success: false, error: 'firebaseUid مطلوب' });
+    } else if (!finalFirebaseUid) {
+      // ❌ لا authToken ولا firebaseUid في body
+      console.log('❌ فشل التحقق: firebaseUid مطلوب (إما من authToken أو من body)');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'firebaseUid مطلوب. يرجى تسجيل الدخول أولاً أو إرسال firebaseUid في body' 
+      });
+    } else {
+      console.log(`⚠️ [FCM] Using firebaseUid from body (no authToken): ${finalFirebaseUid}`);
     }
 
     // ✅ الحصول على user_id
