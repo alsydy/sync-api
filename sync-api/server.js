@@ -5,14 +5,7 @@
 // يدعم العمل أونلاين وأوفلاين مع مزامنة ذكية
 // ============================================================================
 
-// MalyMax Professional Sync API Server - PostgreSQL
-// ============================================================================
-// نظام مزامنة احترافي ومحسّن مع أمان عالي
-// مناسب للتشغيل على Render + قواعد خارجية مثل Supabase
-// ============================================================================
-
 require('dotenv').config();
-
 const express = require('express');
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
@@ -21,27 +14,18 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
-
-const {
-  authenticate,
-  optionalAuthenticate,
+const { 
+  authenticate, 
+  optionalAuthenticate, 
   authorizeResource,
   generalLimiter,
   syncLimiter,
-  generateToken
+  generateToken 
 } = require('./middleware/auth');
 
 // ==================== 1. تهيئة Express Server ====================
 const app = express();
-
-// Render يحدد PORT تلقائياً (الافتراضي 10000)، محلياً نخليها 3001
-const IS_RENDER = String(process.env.RENDER || '').toLowerCase() === 'true'; // :contentReference[oaicite:1]{index=1}
-const PORT = Number(process.env.PORT || (IS_RENDER ? 10000 : 3001));        // :contentReference[oaicite:2]{index=2}
-
-// خلف Reverse Proxy (Render) لازم trust proxy عشان IP/https صح
-if (IS_RENDER) {
-  app.set('trust proxy', 1);
-}
+const PORT = process.env.PORT || 3001;
 
 // ==================== 2. Middleware ====================
 app.use(helmet({
@@ -52,48 +36,21 @@ app.use(helmet({
     },
   },
 }));
-
-// CORS:
-// - تطبيقات الموبايل عادة ما تحتاج CORS (لأنها ليست Browser)
-// - لو عندك واجهة ويب، ضع دومينك في ALLOWED_ORIGINS
-const rawAllowed = (process.env.ALLOWED_ORIGINS || '').trim();
-const allowedList = rawAllowed
-  ? rawAllowed.split(',').map(s => s.trim()).filter(Boolean)
-  : [];
-
-const allowAll = allowedList.length === 0 || allowedList.includes('*');
-
 app.use(cors({
-  origin: (origin, cb) => {
-    // origin قد يكون undefined (مثلاً: موبايل / curl / Postman)
-    if (!origin) return cb(null, true);
-
-    if (allowAll) return cb(null, true);
-
-    if (allowedList.includes(origin)) return cb(null, true);
-
-    return cb(new Error(`CORS blocked for origin: ${origin}`));
-  },
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
   credentials: true
 }));
-
 app.use(compression());
-app.use(morgan(IS_RENDER ? 'combined' : 'dev'));
+app.use(morgan('combined'));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
-// ==================== إعداد PostgreSQL Connection Pool ====================
+// ==================== 3. إعداد PostgreSQL Connection Pool ====================
 
-// ضع هذا السطر هنا 👇
-const isSupabase =
-  (process.env.DB_HOST || '').includes('supabase.co') ||
-  (process.env.DB_HOST || '').includes('supabase.com') ||
-  (process.env.DB_HOST || '').includes('pooler');
-
-// SSL configuration:
-// Supabase غالباً يحتاج SSL، وRender ممكن تستخدم DB_SSL=true حسب مزودك
-const sslConfig = (String(process.env.DB_SSL).toLowerCase() === 'true' || isSupabase)
+// ملاحظة: Supabase يحتاج SSL غالبًا
+const isSupabase = (process.env.DB_HOST || '').includes('supabase.com') || (process.env.DB_HOST || '').includes('pooler');
+const sslConfig = (process.env.DB_SSL === 'true' || isSupabase)
   ? { rejectUnauthorized: false }
   : false;
 
@@ -104,31 +61,18 @@ const pool = new Pool({
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   max: Number(process.env.DB_POOL_MAX || 10),
-  idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT || 30000),
-  connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT || 10000),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
   ssl: sslConfig,
 });
-
-// اختبار الاتصال عند الإقلاع (مفيد جداً على Render)
-(async () => {
-  try {
-    const r = await pool.query('select now() as now');
-    console.log('✅ DB Connected. now =', r.rows[0].now);
-  } catch (e) {
-    console.error('❌ DB connection test failed:', e.message);
-    // على Render الأفضل نوقف عشان يعيد التشغيل تلقائياً
-    process.exit(1);
-  }
-})();
-
+// Test connection
 pool.on('connect', () => {
-  console.log('🔌 PostgreSQL connection created');
+  console.log('✅ تم الاتصال بقاعدة بيانات PostgreSQL بنجاح');
 });
 
 pool.on('error', (err) => {
-  console.error('❌ PostgreSQL pool error:', err);
+  console.error('❌ خطأ في اتصال PostgreSQL:', err);
 });
-
 
 // ==================== 4. دوال مساعدة ====================
 
@@ -1176,7 +1120,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
             firebase_uid = COALESCE($2, firebase_uid),
             full_name = $3,
             phone_number = $4,
-            job_title = COALESCE($5, job_title),
+            job_title = $5,
             password_hash = COALESCE($6, password_hash),
             password_salt = COALESCE($7, password_salt),
             account_number = COALESCE($8, account_number),
@@ -1197,7 +1141,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
             userData.firebaseUid,
             userData.name || userData.fullName,
             userData.phone || userData.phoneNumber,
-            userData.jobTitle,
+            userData.jobTitle || '',
             userData.passwordHash,
             userData.passwordSalt,
             userData.accountNumber,
@@ -1244,7 +1188,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
           firebase_uid = COALESCE($2, firebase_uid),
           full_name = $3,
           phone_number = $4,
-          job_title = COALESCE($5, job_title),
+          job_title = $5,
           password_hash = COALESCE($6, password_hash),
           password_salt = COALESCE($7, password_salt),
           account_number = COALESCE($8, account_number),
@@ -1265,7 +1209,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
           userData.firebaseUid,
           userData.name || userData.fullName,
           userData.phone || userData.phoneNumber,
-          userData.jobTitle,
+          userData.jobTitle || '',
           userData.passwordHash,
           userData.passwordSalt,
           userData.accountNumber,
@@ -1322,7 +1266,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
               user_uuid = COALESCE($2, user_uuid),
               full_name = $3,
               phone_number = $4,
-              job_title = COALESCE($5, job_title),
+              job_title = $5,
               password_hash = COALESCE($6, password_hash),
               password_salt = COALESCE($7, password_salt),
               account_number = COALESCE($8, account_number),
@@ -1343,7 +1287,7 @@ app.put('/api/users/sync', syncLimiter, optionalAuthenticate, async (req, res) =
               uuid,
               userData.name || userData.fullName,
               userData.phone || userData.phoneNumber,
-              userData.jobTitle,
+              userData.jobTitle || '',
               userData.passwordHash,
               userData.passwordSalt,
               userData.accountNumber,
@@ -1675,7 +1619,7 @@ app.put('/api/clients/sync', syncLimiter, optionalAuthenticate, async (req, res)
           owner_firebase_uid = COALESCE($5, owner_firebase_uid),
           client_name = $6,
           phone_number = COALESCE($7, phone_number),
-          job_title = COALESCE($8, job_title),
+          job_title = $8,
           notes = COALESCE($9, notes),
           is_archived = COALESCE($10, is_archived),
           device_id = COALESCE($11, device_id),
@@ -3208,38 +3152,70 @@ app.use((req, res) => {
   });
 });
 
-// ==================== 15. Start Server ====================
-const bindHost = '0.0.0.0'; // مهم للاستضافة
-
-app.listen(PORT, bindHost, () => {
-  // Render يوفر رابط خارجي جاهز
-  const externalUrl = process.env.RENDER_EXTERNAL_URL; // مثل https://myapp.onrender.com :contentReference[oaicite:3]{index=3}
-  const externalHost = process.env.RENDER_EXTERNAL_HOSTNAME; // مثل myapp.onrender.com :contentReference[oaicite:4]{index=4}
-
-  const publicBase =
-    process.env.SERVER_URL ||
-    externalUrl ||
-    (externalHost ? `https://${externalHost}` : null) ||
-    `http://localhost:${PORT}`;
-
-  console.log(`🚀 MalyMax Sync API running`);
-  console.log(`   - Port: ${PORT}`);
-  console.log(`   - Public Base URL: ${publicBase}`);
-  console.log(`🏥 Health Check: ${publicBase}/api/health`);
+// ==================== 13. Start Server ====================
+app.listen(PORT, () => {
+  const os = require('os');
+  const networkInterfaces = os.networkInterfaces();
+  let localIP = 'localhost';
+  
+  // الحصول على IP address للشبكة المحلية
+  for (const interfaceName in networkInterfaces) {
+    const interfaces = networkInterfaces[interfaceName];
+    for (const iface of interfaces) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        localIP = iface.address;
+        break;
+      }
+    }
+    if (localIP !== 'localhost') break;
+  }
+  
+  const serverUrl = process.env.SERVER_URL || `http://${localIP}:${PORT}`;
+  
+  console.log(`🚀 خادم MalyMax Professional Sync API يعمل على المنفذ ${PORT}`);
+  console.log(`📡 API متاح على:`);
+  console.log(`   - Local: http://localhost:${PORT}`);
+  console.log(`   - Network: http://${localIP}:${PORT}`);
+  console.log(`   - Android Emulator: http://10.0.2.2:${PORT}`);
+  console.log(`   - Server URL: ${serverUrl}`);
+  console.log(`\n🏥 Health Check:`);
+  console.log(`   - http://localhost:${PORT}/api/health`);
+  console.log(`   - http://${localIP}:${PORT}/api/health`);
+  console.log(`\n📋 Endpoints المتاحة:`);
+  console.log(`   GET    /api/info - معلومات الخادم`);
+  console.log(`   GET    /api/health - فحص الصحة`);
+  console.log(`   POST   /api/auth/login`);
+  console.log(`   GET    /api/users/:userId`);
+  console.log(`   PUT    /api/users/sync`);
+  console.log(`   POST   /api/fcm-tokens - تسجيل/تحديث FCM token`);
+  console.log(`   GET    /api/fcm-tokens/:firebaseUid - جلب FCM tokens للمستخدم`);
+  console.log(`   DELETE /api/fcm-tokens/:tokenId - حذف/تعطيل FCM token`);
+  console.log(`   GET    /api/clients`);
+  console.log(`   PUT    /api/clients/sync`);
+  console.log(`   GET    /api/accounts`);
+  console.log(`   PUT    /api/accounts/sync`);
+  console.log(`   GET    /api/transactions`);
+  console.log(`   PUT    /api/transactions/sync`);
+  console.log(`   GET    /api/subscriptions/active`);
+  console.log(`   GET    /api/packages`);
+  console.log(`   POST   /api/subscription-requests`);
+  console.log(`   GET    /api/settings/shared`);
+  console.log(`   GET    /api/settings/user/:firebaseUid`);
+  console.log(`\n📱 للاستخدام مع Android Emulator:`);
+  console.log(`   استخدم: http://10.0.2.2:${PORT}`);
+  console.log(`   أو: http://${localIP}:${PORT}\n`);
 });
 
 // ==================== 16. Graceful Shutdown ====================
-async function shutdown(signal) {
-  try {
-    console.log(`🛑 Received ${signal}. Shutting down...`);
-    await pool.end();
-    process.exit(0);
-  } catch (e) {
-    console.error('❌ Error during shutdown:', e);
-    process.exit(1);
-  }
-}
+process.on('SIGTERM', async () => {
+  console.log('🛑 إغلاق الخادم...');
+  await pool.end();
+  process.exit(0);
+});
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGINT', async () => {
+  console.log('🛑 إغلاق الخادم...');
+  await pool.end();
+  process.exit(0);
+});
 
