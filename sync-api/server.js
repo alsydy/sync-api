@@ -695,12 +695,17 @@ function mapClientToAPI(row) {
  * تحويل بيانات الحساب من قاعدة البيانات إلى تنسيق API
  */
 function mapAccountToAPI(row) {
+  // ✅ تحسين: استخدام account_uuid كـ firestoreId إذا كان firestore_id فارغاً
+  // هذا يضمن أن المعاملات التي تستخدم account_uuid كـ accountFirestoreId يمكنها العثور على الحساب
+  const accountUuidStr = row.account_uuid?.toString();
+  const firestoreId = row.firestore_id || accountUuidStr; // استخدام account_uuid كبديل إذا كان firestore_id فارغاً
+  
   return {
     id: row.account_id,
-    entryId: row.account_uuid?.toString() || row.entry_id, // للتوافق
-    accountUuid: row.account_uuid?.toString(),
+    entryId: accountUuidStr || row.entry_id, // للتوافق
+    accountUuid: accountUuidStr,
     cloudId: row.cloud_id,
-    firestoreId: row.firestore_id,
+    firestoreId: firestoreId, // ✅ الآن يحتوي على account_uuid إذا كان firestore_id فارغاً
     ownerUserId: row.owner_user_id,
     ownerFirebaseUid: row.owner_firebase_uid,
     name: row.account_name,
