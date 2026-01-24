@@ -14,6 +14,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
+const admin = require('firebase-admin');
 const { 
   authenticate, 
   optionalAuthenticate, 
@@ -46,7 +47,37 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(generalLimiter);
 
-// ==================== 3. إعداد PostgreSQL Connection Pool ====================
+// ==================== 3. تهيئة Firebase Admin SDK ====================
+try {
+  // ✅ استخدام GOOGLE_SERVICE_ACCOUNT_JSON من متغيرات البيئة (مثل Render)
+  const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  
+  if (serviceAccountJson) {
+    // إذا كان JSON string في متغير البيئة (مثل Render)
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('✅ Firebase Admin SDK initialized from GOOGLE_SERVICE_ACCOUNT_JSON');
+  } else {
+    // محاولة استخدام ملف محلي (للتطوير)
+    try {
+      const serviceAccount = require('./serviceAccountKey.json');
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount)
+      });
+      console.log('✅ Firebase Admin SDK initialized from serviceAccountKey.json');
+    } catch (localError) {
+      console.warn('⚠️ Firebase Admin SDK not initialized: GOOGLE_SERVICE_ACCOUNT_JSON not set and serviceAccountKey.json not found');
+      console.warn('   FCM notifications will be disabled. Set GOOGLE_SERVICE_ACCOUNT_JSON in environment variables.');
+    }
+  }
+} catch (error) {
+  console.error('❌ Failed to initialize Firebase Admin SDK:', error.message);
+  console.warn('⚠️ FCM notifications will be disabled');
+}
+
+// ==================== 4. إعداد PostgreSQL Connection Pool ====================
 
 // ملاحظة: Supabase يحتاج SSL غالبًا
 const isSupabase = (process.env.DB_HOST || '').includes('supabase.com') || (process.env.DB_HOST || '').includes('pooler');
@@ -596,6 +627,94 @@ async function resolveConflict(tableName, uuid, localData, remoteData) {
   } else {
     console.log(`✅ Conflict resolved: Remote wins (same version, newer timestamp)`);
     return { winner: remoteData, conflict: true, reason: 'timestamp' };
+  }
+}
+
+/**
+ * إرسال إشعار FCM للمزامنة الفورية بين الأجهزة
+ * @param {string} firebaseUid - معرف Firebase للمستخدم
+ * @param {string} sourceDeviceId - معرف الجهاز الذي أنشأ التغيير (للتجاهل)
+ * @param {string} entityType - نوع الكيان (transaction, customer, account)
+ * @param {string} action - نوع العملية (created, updated, deleted)
+ * @param {string} entityId - معرف الكيان
+ */
+async function sendSyncNotification(firebaseUid, sourceDeviceId, entityType, action, entityId) {
+  if (!firebaseUid) {
+    console.warn('⚠️ Cannot send sync notification: firebaseUid is missing');
+    return;
+  }
+
+  try {
+    // ✅ جلب جميع FCM tokens النشطة للمستخدم (باستثناء الجهاز المصدر)
+    const tokensResult = await pool.query(
+      `SELECT token, device_id FROM user_fcm_tokens 
+       WHERE firebase_uid = $1 AND is_active = TRUE 
+       ${sourceDeviceId ? 'AND (device_id IS NULL OR device_id != $2)' : ''}
+       ORDER BY is_primary DESC, last_used_at DESC`,
+      sourceDeviceId ? [firebaseUid, sourceDeviceId] : [firebaseUid]
+    );
+
+    if (tokensResult.rows.length === 0) {
+      console.log(`ℹ️ No FCM tokens found for user ${firebaseUid} (excluding device ${sourceDeviceId})`);
+      return;
+    }
+
+    const tokens = tokensResult.rows.map(row => row.token);
+    console.log(`📤 Sending sync notification to ${tokens.length} device(s) for ${entityType} ${action}: ${entityId}`);
+
+    // ✅ التحقق من تهيئة Firebase Admin SDK
+    if (!admin.apps.length) {
+      console.warn('⚠️ Firebase Admin SDK not initialized - skipping sync notification');
+      return;
+    }
+
+    // ✅ إرسال إشعار FCM عبر Firebase Admin SDK
+    const message = {
+      notification: {
+        title: 'تحديث جديد',
+        body: `تم ${action === 'created' ? 'إضافة' : action === 'updated' ? 'تحديث' : 'حذف'} ${entityType === 'transaction' ? 'معاملة' : entityType === 'customer' ? 'عميل' : 'حساب'}`,
+      },
+      data: {
+        type: 'sync_required',
+        entityType: entityType,
+        action: action,
+        entityId: entityId || '',
+        firebaseUid: firebaseUid,
+        timestamp: Date.now().toString()
+      },
+      android: {
+        priority: 'high',
+      },
+      apns: {
+        headers: {
+          'apns-priority': '10',
+        },
+      },
+    };
+
+    // إرسال إشعار لكل token
+    const notificationPromises = tokens.map(async (token) => {
+      try {
+        const response = await admin.messaging().send({
+          ...message,
+          token: token
+        });
+        console.log(`✅ FCM notification sent successfully to token ${token.substring(0, 20)}...: ${response}`);
+      } catch (error) {
+        // معالجة الأخطاء الشائعة
+        if (error.code === 'messaging/invalid-registration-token' || 
+            error.code === 'messaging/registration-token-not-registered') {
+          console.warn(`⚠️ Invalid or unregistered token ${token.substring(0, 20)}... - consider removing it from database`);
+        } else {
+          console.error(`❌ Error sending FCM notification to token ${token.substring(0, 20)}...:`, error.message);
+        }
+      }
+    });
+
+    await Promise.allSettled(notificationPromises);
+  } catch (error) {
+    console.error('❌ Error in sendSyncNotification:', error);
+    // لا نرمي خطأ هنا حتى لا نؤثر على العملية الأساسية
   }
 }
 
@@ -1664,6 +1783,9 @@ app.put('/api/clients/sync', syncLimiter, optionalAuthenticate, async (req, res)
         req
       );
       
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(client.owner_firebase_uid, clientData.deviceId, 'customer', 'updated', client.client_uuid?.toString());
+      
       return res.json({ success: true, data: mapClientToAPI(client), action: 'updated' });
     } else {
       // الحصول على ownerUserId الصحيح
@@ -1708,6 +1830,9 @@ app.put('/api/clients/sync', syncLimiter, optionalAuthenticate, async (req, res)
         client, 
         req
       );
+      
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(client.owner_firebase_uid, clientData.deviceId, 'customer', 'created', client.client_uuid?.toString());
       
       return res.json({ success: true, data: mapClientToAPI(client), action: 'created' });
     }
@@ -1841,6 +1966,9 @@ app.put('/api/accounts/sync', syncLimiter, optionalAuthenticate, async (req, res
         req
       );
       
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(account.owner_firebase_uid, accountData.deviceId, 'account', 'updated', account.account_uuid?.toString());
+      
       return res.json({ success: true, data: mapAccountToAPI(account), action: 'updated' });
     } else {
       // الحصول على ownerUserId الصحيح
@@ -1891,6 +2019,9 @@ app.put('/api/accounts/sync', syncLimiter, optionalAuthenticate, async (req, res
         account, 
         req
       );
+      
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(account.owner_firebase_uid, accountData.deviceId, 'account', 'created', account.account_uuid?.toString());
       
       return res.json({ success: true, data: mapAccountToAPI(account), action: 'created' });
     }
@@ -2087,6 +2218,10 @@ app.delete('/api/transactions/by-uuid/:transactionUuid', optionalAuthenticate, a
 
     const transaction = result.rows[0];
     await logAudit(transaction.owner_user_id, transaction.owner_firebase_uid, 'delete', 'transaction', transaction.transaction_id.toString(), null, transaction, req);
+    
+    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+    await sendSyncNotification(transaction.owner_firebase_uid, null, 'transaction', 'deleted', transaction.transaction_uuid?.toString());
+    
     res.json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
     handleError(res, error);
@@ -2286,6 +2421,9 @@ app.put('/api/transactions/sync', syncLimiter, optionalAuthenticate, async (req,
         req
       );
       
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(transaction.owner_firebase_uid, transactionData.deviceId, 'transaction', 'updated', transaction.transaction_uuid?.toString());
+      
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
     } else {
       // الحصول على ownerUserId الصحيح
@@ -2415,6 +2553,9 @@ app.put('/api/transactions/sync', syncLimiter, optionalAuthenticate, async (req,
         req
       );
       
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+      await sendSyncNotification(transaction.owner_firebase_uid, transactionData.deviceId, 'transaction', 'created', transaction.transaction_uuid?.toString());
+      
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
     }
   } catch (error) {
@@ -2474,6 +2615,9 @@ app.delete('/api/transactions/:transactionId', optionalAuthenticate, async (req,
       null, 
       req
     );
+    
+    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
+    await sendSyncNotification(transaction.owner_firebase_uid, null, 'transaction', 'deleted', transaction.transaction_uuid?.toString());
     
     res.json({ success: true, message: 'تم حذف المعاملة بنجاح' });
   } catch (error) {
