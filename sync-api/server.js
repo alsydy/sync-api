@@ -634,14 +634,49 @@ async function resolveConflict(tableName, uuid, localData, remoteData) {
 }
 
 /**
+ * جلب تفاصيل المعاملة للإشعار (اسم العميل، المبلغ، النوع)
+ */
+async function getTransactionDetailsForNotification(transactionUuid) {
+  try {
+    const result = await pool.query(
+      `SELECT 
+        t.transaction_amount,
+        t.currency_code,
+        t.transaction_direction,
+        c.client_name
+      FROM financial_transactions t
+      LEFT JOIN business_clients c ON t.client_id = c.client_id
+      WHERE t.transaction_uuid = $1 AND t.deleted_at IS NULL`,
+      [transactionUuid]
+    );
+    
+    if (result.rows.length === 0) {
+      return null;
+    }
+    
+    const row = result.rows[0];
+    return {
+      customerName: row.client_name || 'عميل غير معروف',
+      amount: parseFloat(row.transaction_amount),
+      direction: row.transaction_direction,
+      currency: row.currency_code
+    };
+  } catch (error) {
+    console.error('❌ Error fetching transaction details for notification:', error);
+    return null;
+  }
+}
+
+/**
  * إرسال إشعار FCM للمزامنة الفورية بين الأجهزة
  * @param {string} firebaseUid - معرف Firebase للمستخدم
  * @param {string} sourceDeviceId - معرف الجهاز الذي أنشأ التغيير (للتجاهل)
  * @param {string} entityType - نوع الكيان (transaction, customer, account)
  * @param {string} action - نوع العملية (created, updated, deleted)
  * @param {string} entityId - معرف الكيان
+ * @param {object} details - تفاصيل إضافية (customerName, amount, direction, currency) للمعاملات
  */
-async function sendSyncNotification(firebaseUid, sourceDeviceId, entityType, action, entityId) {
+async function sendSyncNotification(firebaseUid, sourceDeviceId, entityType, action, entityId, details = {}) {
   if (!firebaseUid) {
     console.warn('⚠️ Cannot send sync notification: firebaseUid is missing');
     return;
@@ -671,11 +706,25 @@ async function sendSyncNotification(firebaseUid, sourceDeviceId, entityType, act
       return;
     }
 
+    // ✅ بناء محتوى الإشعار مع التفاصيل
+    let notificationTitle = 'تحديث جديد';
+    let notificationBody = `تم ${action === 'created' ? 'إضافة' : action === 'updated' ? 'تحديث' : 'حذف'} ${entityType === 'transaction' ? 'معاملة' : entityType === 'customer' ? 'عميل' : 'حساب'}`;
+    
+    // ✅ إضافة تفاصيل المعاملة إذا كانت متوفرة
+    if (entityType === 'transaction' && details.customerName && details.amount !== undefined) {
+      const directionText = details.direction === 'income' || details.direction === 'CREDIT' ? 'دائن' : 'مدين';
+      const currencySymbol = details.currency === 'USD' ? '$' : details.currency === 'YER' ? 'ر.ي' : details.currency === 'SAR' ? 'ر.س' : '';
+      const formattedAmount = `${currencySymbol}${parseFloat(details.amount).toLocaleString('ar')}`;
+      
+      notificationTitle = 'معاملة جديدة';
+      notificationBody = `${details.customerName}\n${formattedAmount} (${directionText})`;
+    }
+    
     // ✅ إرسال إشعار FCM عبر Firebase Admin SDK
     const message = {
       notification: {
-        title: 'تحديث جديد',
-        body: `تم ${action === 'created' ? 'إضافة' : action === 'updated' ? 'تحديث' : 'حذف'} ${entityType === 'transaction' ? 'معاملة' : entityType === 'customer' ? 'عميل' : 'حساب'}`,
+        title: notificationTitle,
+        body: notificationBody,
       },
       data: {
         type: 'sync_required',
@@ -2222,8 +2271,16 @@ app.delete('/api/transactions/by-uuid/:transactionUuid', optionalAuthenticate, a
     const transaction = result.rows[0];
     await logAudit(transaction.owner_user_id, transaction.owner_firebase_uid, 'delete', 'transaction', transaction.transaction_id.toString(), null, transaction, req);
     
-    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
-    await sendSyncNotification(transaction.owner_firebase_uid, null, 'transaction', 'deleted', transaction.transaction_uuid?.toString());
+    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية (استخدام device_id من المعاملة)
+    const transactionDetails = await getTransactionDetailsForNotification(transaction.transaction_uuid?.toString());
+    await sendSyncNotification(
+      transaction.owner_firebase_uid, 
+      transaction.device_id, // ✅ استخدام device_id من المعاملة المحذوفة
+      'transaction', 
+      'deleted', 
+      transaction.transaction_uuid?.toString(),
+      transactionDetails
+    );
     
     res.json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
@@ -2424,8 +2481,16 @@ app.put('/api/transactions/sync', syncLimiter, optionalAuthenticate, async (req,
         req
       );
       
-      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
-      await sendSyncNotification(transaction.owner_firebase_uid, transactionData.deviceId, 'transaction', 'updated', transaction.transaction_uuid?.toString());
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية مع التفاصيل
+      const transactionDetails = await getTransactionDetailsForNotification(transaction.transaction_uuid?.toString());
+      await sendSyncNotification(
+        transaction.owner_firebase_uid, 
+        transactionData.deviceId, 
+        'transaction', 
+        'updated', 
+        transaction.transaction_uuid?.toString(),
+        transactionDetails
+      );
       
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
     } else {
@@ -2556,8 +2621,16 @@ app.put('/api/transactions/sync', syncLimiter, optionalAuthenticate, async (req,
         req
       );
       
-      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
-      await sendSyncNotification(transaction.owner_firebase_uid, transactionData.deviceId, 'transaction', 'created', transaction.transaction_uuid?.toString());
+      // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية مع التفاصيل
+      const transactionDetails = await getTransactionDetailsForNotification(transaction.transaction_uuid?.toString());
+      await sendSyncNotification(
+        transaction.owner_firebase_uid, 
+        transactionData.deviceId, 
+        'transaction', 
+        'created', 
+        transaction.transaction_uuid?.toString(),
+        transactionDetails
+      );
       
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
     }
@@ -2619,8 +2692,16 @@ app.delete('/api/transactions/:transactionId', optionalAuthenticate, async (req,
       req
     );
     
-    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية
-    await sendSyncNotification(transaction.owner_firebase_uid, null, 'transaction', 'deleted', transaction.transaction_uuid?.toString());
+    // ✅ إرسال إشعار FCM للأجهزة الأخرى للمزامنة الفورية (استخدام device_id من المعاملة)
+    const transactionDetails = await getTransactionDetailsForNotification(transaction.transaction_uuid?.toString());
+    await sendSyncNotification(
+      transaction.owner_firebase_uid, 
+      transaction.device_id, // ✅ استخدام device_id من المعاملة المحذوفة
+      'transaction', 
+      'deleted', 
+      transaction.transaction_uuid?.toString(),
+      transactionDetails
+    );
     
     res.json({ success: true, message: 'تم حذف المعاملة بنجاح' });
   } catch (error) {
