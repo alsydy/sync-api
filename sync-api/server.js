@@ -29,6 +29,9 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ==================== 2. Middleware ====================
+// ✅ تفعيل trust proxy للعمل خلف proxy (مثل Render)
+app.set('trust proxy', true);
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -655,7 +658,7 @@ async function sendSyncNotification(firebaseUid, sourceDeviceId, entityType, act
     );
 
     if (tokensResult.rows.length === 0) {
-      console.log(`ℹ️ No FCM tokens found for user ${firebaseUid} (excluding device ${sourceDeviceId})`);
+      console.log(`ℹ️ No FCM tokens found for user ${firebaseUid} (excluding device ${sourceDeviceId || 'none'})`);
       return;
     }
 
@@ -2980,6 +2983,7 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
     const {
       firebaseUid, // ✅ اختياري - الخادم يستخرجه من authToken إذا كان متاحاً
       token,
+      deviceId, // ✅ معرف الجهاز الفريد (DeviceIdManager.getDeviceId)
       deviceModel,
       deviceBrand,
       deviceManufacturer,
@@ -3055,14 +3059,16 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
         `UPDATE user_fcm_tokens 
          SET is_active = TRUE, 
              last_used_at = CURRENT_TIMESTAMP,
-             device_model = COALESCE($1, device_model),
-             device_brand = COALESCE($2, device_brand),
-             device_manufacturer = COALESCE($3, device_manufacturer),
-             app_version_name = COALESCE($4, app_version_name),
-             app_version_code = COALESCE($5::INTEGER, app_version_code),
+             device_id = COALESCE($1, device_id),
+             device_model = COALESCE($2, device_model),
+             device_brand = COALESCE($3, device_brand),
+             device_manufacturer = COALESCE($4, device_manufacturer),
+             app_version_name = COALESCE($5, app_version_name),
+             app_version_code = COALESCE($6::INTEGER, app_version_code),
              updated_at = CURRENT_TIMESTAMP
-         WHERE token_id = $6`,
+         WHERE token_id = $7`,
         [
+          deviceId || null,
           deviceModel || null,
           deviceBrand || null,
           deviceManufacturer || null,
@@ -3096,22 +3102,23 @@ app.post('/api/fcm-tokens', optionalAuthenticate, async (req, res) => {
     
     const result = await pool.query(
       `INSERT INTO user_fcm_tokens (
-        user_id, firebase_uid, token, device_model, device_brand, 
+        user_id, firebase_uid, token, device_id, device_model, device_brand, 
         device_manufacturer, app_version_name, app_version_code, 
         is_active, is_primary, last_used_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, CURRENT_TIMESTAMP)
       RETURNING *`,
       [
         userId,                    // $1
         finalFirebaseUid,          // $2
         token,                      // $3
-        deviceModel || null,        // $4
-        deviceBrand || null,        // $5
-        deviceManufacturer || null, // $6
-        appVersionName || null,     // $7
-        appVersionCodeInt,          // $8 (INTEGER)
-        true,                       // $9 is_active
-        true                        // $10 is_primary (الـ token الجديد يصبح primary)
+        deviceId || null,           // $4 device_id
+        deviceModel || null,        // $5
+        deviceBrand || null,        // $6
+        deviceManufacturer || null, // $7
+        appVersionName || null,     // $8
+        appVersionCodeInt,          // $9 (INTEGER)
+        true,                       // $10 is_active
+        true                        // $11 is_primary (الـ token الجديد يصبح primary)
       ]
     );
 
@@ -3168,7 +3175,7 @@ app.get('/api/fcm-tokens/:firebaseUid', optionalAuthenticate, async (req, res) =
     }
 
     const result = await pool.query(
-      `SELECT token_id, token_uuid, token, device_model, device_brand, 
+      `SELECT token_id, token_uuid, token, device_id, device_model, device_brand, 
               device_manufacturer, app_version_name, app_version_code,
               is_active, is_primary, last_used_at, created_at, updated_at
        FROM user_fcm_tokens 
@@ -3181,6 +3188,7 @@ app.get('/api/fcm-tokens/:firebaseUid', optionalAuthenticate, async (req, res) =
       tokenId: row.token_id,
       tokenUuid: row.token_uuid,
       token: row.token,
+      deviceId: row.device_id,
       deviceModel: row.device_model,
       deviceBrand: row.device_brand,
       deviceManufacturer: row.device_manufacturer,
