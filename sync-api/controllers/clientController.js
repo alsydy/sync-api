@@ -361,11 +361,59 @@ async function syncClient(req, res, next) {
   }
 }
 
+/**
+ * GET /api/clients/by-phone/:phoneNumber
+ * البحث عن جميع العملاء برقم الهاتف (للمتابعة الديون)
+ */
+async function getClientsByPhone(req, res, next) {
+  try {
+    const { phoneNumber } = req.params;
+    const { ownerFirebaseUid, excludeOwnerId } = req.query;
+    
+    if (!phoneNumber) {
+      return res.status(400).json({
+        success: false,
+        error: 'phoneNumber مطلوب'
+      });
+    }
+    
+    let query = `
+      SELECT * FROM business_clients 
+      WHERE phone_number = $1 
+        AND deleted_at IS NULL
+    `;
+    const params = [phoneNumber];
+    let paramIndex = 2;
+    
+    // تصفية حسب ownerFirebaseUid إذا تم توفيره
+    if (ownerFirebaseUid) {
+      query += ` AND owner_firebase_uid = $${paramIndex++}`;
+      params.push(ownerFirebaseUid);
+    }
+    
+    // استثناء ownerId محدد (للمتابعة الديون)
+    if (excludeOwnerId) {
+      query += ` AND owner_user_id != $${paramIndex++}`;
+      params.push(parseInt(excludeOwnerId, 10));
+    }
+    
+    query += ' ORDER BY updated_at DESC, created_at DESC';
+    
+    const result = await pool.query(query, params);
+    const clients = result.rows.map(row => mapClientToAPI(row));
+    
+    res.json({ success: true, data: clients, count: clients.length });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getClients,
   getClientById,
   createClient,
   deleteClientByUuid,
-  syncClient
+  syncClient,
+  getClientsByPhone
 };
 
