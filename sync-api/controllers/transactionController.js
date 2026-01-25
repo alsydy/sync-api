@@ -793,7 +793,7 @@ async function getDebtSummary(req, res, next) {
     const creditors = [];
     for (const [creditorUid, summary] of creditorMap.entries()) {
       const userResult = await pool.query(
-        'SELECT user_id, name, full_name, phone_number, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
+        'SELECT user_id, full_name, phone_number, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
         [creditorUid]
       );
       
@@ -804,7 +804,7 @@ async function getDebtSummary(req, res, next) {
       const lastTransaction = summary.transactions[0]; // تم ترتيبها DESC
       
       creditors.push({
-        creditorName: user.name || user.full_name || 'مستخدم مجهول',
+        creditorName: user.full_name || 'مستخدم مجهول',
         creditorPhone: user.phone_number || '',
         creditorJobTitle: user.job_title || null,
         creditorFirebaseUid: creditorUid,
