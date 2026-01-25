@@ -1,7 +1,8 @@
 // ============================================================================
-// Monitoring Service
+// Monitoring Service (Lightweight / Small Servers Friendly)
 // ============================================================================
-// خدمة جمع إحصائيات المراقبة الشاملة للخادم
+// خدمة جمع إحصائيات المراقبة الشاملة للخادم - نسخة خفيفة جداً
+// مناسبة للسيرفرات الصغيرة (مثل 1GB RAM) وتقلل Disk/DB/CPU
 // ============================================================================
 
 const os = require('os');
@@ -10,7 +11,33 @@ const path = require('path');
 const { pool } = require('../config/database');
 const logger = require('../utils/logger');
 
-// إحصائيات الطلبات (في الذاكرة)
+// ===================== إعدادات قابلة للتعديل عبر ENV =====================
+const MONITOR_CACHE_TTL_MS = Number(process.env.MONITOR_CACHE_TTL_MS || 5000);     // كاش كامل الإحصائيات
+const MONITOR_DB_TTL_MS = Number(process.env.MONITOR_DB_TTL_MS || 20000);         // كاش DB info
+const MONITOR_LOGS_TTL_MS = Number(process.env.MONITOR_LOGS_TTL_MS || 60000);     // كاش logs
+const MAX_HISTORY = Number(process.env.MONITOR_MAX_HISTORY || 30);                // تاريخ الذاكرة (صغير)
+const LOG_TAIL_KB = Number(process.env.MONITOR_LOG_TAIL_KB || 32);                // اقرأ آخر X KB فقط
+const MAX_REQUEST_ERRORS = Number(process.env.MONITOR_MAX_REQUEST_ERRORS || 50);
+const MAX_SLOW_REQUESTS = Number(process.env.MONITOR_MAX_SLOW_REQUESTS || 20);
+const MAX_DB_ERRORS = Number(process.env.MONITOR_MAX_DB_ERRORS || 50);
+const MAX_DB_SLOW = Number(process.env.MONITOR_MAX_DB_SLOW || 20);
+const DB_SLOW_QUERY_MS = Number(process.env.MONITOR_DB_SLOW_QUERY_MS || 700);     // كان 500ms
+const SLOW_REQUEST_MS = Number(process.env.MONITOR_SLOW_REQUEST_MS || 1500);      // كان 1000ms
+
+// ===================== بيانات ثابتة (تجنب حساب مكلف متكرر) =====================
+const CPU_INFO = (() => {
+  try {
+    const cpus = os.cpus();
+    return {
+      model: cpus?.[0]?.model || 'N/A',
+      cores: Array.isArray(cpus) ? cpus.length : 0
+    };
+  } catch {
+    return { model: 'N/A', cores: 0 };
+  }
+})();
+
+// ===================== إحصائيات الطلبات (في الذاكرة) =====================
 let requestStats = {
   total: 0,
   byMethod: {},
@@ -21,49 +48,89 @@ let requestStats = {
   startTime: Date.now()
 };
 
-// إحصائيات قاعدة البيانات
+// ===================== إحصائيات قاعدة البيانات =====================
 let dbStats = {
   queries: 0,
   slowQueries: [],
   errors: []
 };
 
-// إحصائيات الذاكرة
+// ===================== تاريخ الذاكرة =====================
 let memoryHistory = [];
-const MAX_HISTORY = 100; // آخر 100 قياس
 
-// ----------------------------------------------------------------------------
+// ===================== Cache عام =====================
+let statsCache = { ts: 0, data: null };
+let dbCache = { ts: 0, data: null };
+let logsCache = { ts: 0, data: null };
+
+// ============================================================================
 // Helpers
-// ----------------------------------------------------------------------------
-function poolSnapshot() {
-  return {
-    totalCount: pool?.totalCount || 0,
-    idleCount: pool?.idleCount || 0,
-    waitingCount: pool?.waitingCount || 0,
-    max: pool?.options?.max || Number(process.env.DB_POOL_MAX || 10)
-  };
+// ============================================================================
+
+function nowMs() { return Date.now(); }
+
+function clampArray(arr, max) {
+  if (!Array.isArray(arr)) return [];
+  return arr.length > max ? arr.slice(-max) : arr;
 }
 
-async function safeQuery(sql, params = []) {
+function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+}
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+
+  if (days > 0) return `${days} يوم ${hours} ساعة ${minutes} دقيقة`;
+  if (hours > 0) return `${hours} ساعة ${minutes} دقيقة ${secs} ثانية`;
+  if (minutes > 0) return `${minutes} دقيقة ${secs} ثانية`;
+  return `${secs} ثانية`;
+}
+
+// اقرأ آخر جزء من الملف فقط (بدون قراءة الملف كامل) - مهم لتخفيف Disk IO
+async function readFileTail(filePath, tailBytes) {
   try {
-    if (!pool || typeof pool.query !== 'function') {
-      return { ok: false, error: 'Pool not initialized', rows: [] };
+    const handle = await fs.promises.open(filePath, 'r');
+    try {
+      const stat = await handle.stat();
+      const size = stat.size || 0;
+      const readSize = Math.min(size, tailBytes);
+      const start = Math.max(0, size - readSize);
+
+      const buffer = Buffer.alloc(readSize);
+      await handle.read(buffer, 0, readSize, start);
+      return buffer.toString('utf8');
+    } finally {
+      await handle.close();
     }
-    const res = await pool.query(sql, params);
-    return { ok: true, rows: res?.rows ?? [] };
   } catch (e) {
-    return { ok: false, error: e?.message || String(e), rows: [] };
+    return null;
   }
 }
 
-/**
- * جمع معلومات النظام
- */
+function safeJsonParseLines(text, maxLines = 10) {
+  if (!text) return [];
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const tail = lines.slice(-maxLines);
+  return tail.map(line => {
+    try { return JSON.parse(line); } catch { return { raw: line }; }
+  });
+}
+
+// ============================================================================
+// جمع معلومات النظام (خفيف)
+// ============================================================================
 function getSystemInfo() {
-  const cpus = os.cpus();
   const totalMem = os.totalmem();
   const freeMem = os.freemem();
-  const usedMem = totalMem - freeMem;
+  const usedMem = Math.max(0, totalMem - freeMem);
 
   return {
     platform: os.platform(),
@@ -71,23 +138,23 @@ function getSystemInfo() {
     nodeVersion: process.version,
     uptime: process.uptime(),
     cpu: {
-      model: cpus[0].model,
-      cores: cpus.length,
+      model: CPU_INFO.model,
+      cores: CPU_INFO.cores,
       usage: process.cpuUsage()
     },
     memory: {
       total: totalMem,
       free: freeMem,
       used: usedMem,
-      percentage: ((usedMem / totalMem) * 100).toFixed(2)
+      percentage: totalMem ? ((usedMem / totalMem) * 100).toFixed(2) : '0.00'
     },
     loadAverage: os.loadavg()
   };
 }
 
-/**
- * جمع معلومات عملية Node.js
- */
+// ============================================================================
+// جمع معلومات عملية Node.js
+// ============================================================================
 function getProcessInfo() {
   const usage = process.memoryUsage();
   const cpuUsage = process.cpuUsage();
@@ -96,88 +163,98 @@ function getProcessInfo() {
     pid: process.pid,
     uptime: process.uptime(),
     memory: {
-      rss: usage.rss,                    // Resident Set Size
-      heapTotal: usage.heapTotal,        // إجمالي Heap
-      heapUsed: usage.heapUsed,          // المستخدم من Heap
-      external: usage.external,          // الذاكرة الخارجية
-      arrayBuffers: usage.arrayBuffers   // Array Buffers
+      rss: usage.rss,
+      heapTotal: usage.heapTotal,
+      heapUsed: usage.heapUsed,
+      external: usage.external,
+      arrayBuffers: usage.arrayBuffers
     },
     cpu: {
-      user: cpuUsage.user,               // وقت المستخدم (microseconds)
-      system: cpuUsage.system            // وقت النظام (microseconds)
+      user: cpuUsage.user,
+      system: cpuUsage.system
     }
   };
 }
 
-/**
- * جمع معلومات قاعدة البيانات
- */
-async function getDatabaseInfo() {
-  // 1) معلومات عامة + فحص اتصال سريع
-  const health = await safeQuery('SELECT NOW() as now, version() as version');
+// ============================================================================
+// جمع معلومات قاعدة البيانات (مع Cache لتخفيف الضغط)
+// ============================================================================
+async function getDatabaseInfoCached() {
+  const now = nowMs();
+  if (dbCache.data && (now - dbCache.ts) < MONITOR_DB_TTL_MS) return dbCache.data;
 
-  // لو فشل الاتصال: لا تكسر المراقبة
-  if (!health.ok || !health.rows.length) {
-    // سجّل الخطأ (بدون spam شديد: ممكن تحب تقلل التسجيل لاحقًا)
-    try {
-      if (typeof logger.errorMsg === 'function') {
-        logger.errorMsg('Error getting database info', { error: health.error });
-      } else if (typeof logger.error === 'function') {
-        logger.error('Error getting database info', { error: health.error });
-      }
-    } catch (_) {}
+  const data = await getDatabaseInfoLight();
+  dbCache = { ts: now, data };
+  return data;
+}
+
+async function getDatabaseInfoLight() {
+  // ✅ “خفيف”:
+  // - استعلام version/now
+  // - استعلام حجم القاعدة + اتصالات (واحد)
+  // * وإذا فشل، لا نقتل السيرفر
+  try {
+    const poolHealth = await pool.query('SELECT NOW() as now, version() as version');
+    const version = poolHealth.rows?.[0]?.version || 'N/A';
+
+    // إحصائيات الـ Pool
+    const poolStats = {
+      totalCount: pool.totalCount || 0,
+      idleCount: pool.idleCount || 0,
+      waitingCount: pool.waitingCount || 0,
+      max: pool.options?.max || 10
+    };
+
+    // استعلام واحد فقط (بدلاً من عدة استعلامات)
+    const dbSizeResult = await pool.query(`
+      SELECT 
+        pg_size_pretty(pg_database_size(current_database())) as size,
+        (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
+        (SELECT count(*) FROM pg_stat_activity) as total_connections
+    `);
+
+    const row = dbSizeResult.rows?.[0] || {};
 
     return {
-      connected: false,
-      error: health.error || 'Database unavailable',
-      pool: poolSnapshot(),
+      connected: true,
+      version: version.split(' ').slice(0, 2).join(' '),
+      timestamp: poolHealth.rows?.[0]?.now,
+      pool: poolStats,
+      size: row.size || 'N/A',
+      connections: {
+        active: parseInt(row.active_connections || 0, 10),
+        total: parseInt(row.total_connections || 0, 10)
+      },
       queries: {
         total: dbStats.queries,
         slow: dbStats.slowQueries.length,
         errors: dbStats.errors.length
-      }
+      },
+      warning: null
+    };
+  } catch (error) {
+    // لا تسوي spam لوج كثير
+    logger.error('Error getting database info', { error: error.message });
+    return {
+      connected: false,
+      error: error.message
     };
   }
-
-  const row0 = health.rows[0] || {};
-  const versionRaw = row0.version || '';
-  const versionShort = versionRaw ? versionRaw.split(' ').slice(0, 2).join(' ') : 'unknown';
-
-  // 2) حجم القاعدة واتصالاتها (قد يفشل وحده حتى لو health نجح)
-  const dbSize = await safeQuery(`
-    SELECT 
-      pg_size_pretty(pg_database_size(current_database())) as size,
-      (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections,
-      (SELECT count(*) FROM pg_stat_activity) as total_connections
-  `);
-
-  // لو فشل هذا الاستعلام، رجّع المعلومات الأساسية فقط
-  const sizeRow = dbSize.rows?.[0] || {};
-
-  return {
-    connected: true,
-    version: versionShort,
-    timestamp: row0.now || null,
-    pool: poolSnapshot(),
-    size: dbSize.ok ? (sizeRow.size || 'N/A') : 'N/A',
-    connections: {
-      active: dbSize.ok ? parseInt(sizeRow.active_connections || 0, 10) : 0,
-      total: dbSize.ok ? parseInt(sizeRow.total_connections || 0, 10) : 0
-    },
-    queries: {
-      total: dbStats.queries,
-      slow: dbStats.slowQueries.length,
-      errors: dbStats.errors.length
-    },
-    // أعرض خطأ ثانوي إذا فشل استعلام الحجم/الاتصالات فقط
-    warning: dbSize.ok ? null : (dbSize.error || 'Failed to read db stats')
-  };
 }
 
-/**
- * جمع معلومات السجلات (Logs)
- */
-function getLogsInfo() {
+// ============================================================================
+// جمع معلومات السجلات (Logs) - Cache + Tail Only
+// ============================================================================
+async function getLogsInfoCached() {
+  const now = nowMs();
+  if (logsCache.data && (now - logsCache.ts) < MONITOR_LOGS_TTL_MS) return logsCache.data;
+
+  const data = await getLogsInfoLight();
+  logsCache = { ts: now, data };
+  return data;
+}
+
+async function getLogsInfoLight() {
   const logsDir = path.join(__dirname, '../logs');
   const logFiles = {
     error: path.join(logsDir, 'error.log'),
@@ -190,38 +267,36 @@ function getLogsInfo() {
 
   for (const [name, filePath] of Object.entries(logFiles)) {
     try {
-      if (fs.existsSync(filePath)) {
-        const stats = fs.statSync(filePath);
-        const content = fs.readFileSync(filePath, 'utf8');
-        const lines = content.split('\n').filter(line => line.trim());
-
-        // آخر 10 أخطاء من error.log
-        if (name === 'error') {
-          logs[name] = {
-            exists: true,
-            size: stats.size,
-            sizeFormatted: formatBytes(stats.size),
-            modified: stats.mtime,
-            lineCount: lines.length,
-            recentErrors: lines.slice(-10).map(line => {
-              try {
-                return JSON.parse(line);
-              } catch {
-                return { raw: line };
-              }
-            })
-          };
-        } else {
-          logs[name] = {
-            exists: true,
-            size: stats.size,
-            sizeFormatted: formatBytes(stats.size),
-            modified: stats.mtime,
-            lineCount: lines.length
-          };
-        }
-      } else {
+      const exists = fs.existsSync(filePath);
+      if (!exists) {
         logs[name] = { exists: false };
+        continue;
+      }
+
+      const stats = fs.statSync(filePath);
+
+      // ✅ لا نقرأ الملف كامل أبداً
+      if (name === 'error') {
+        const tailText = await readFileTail(filePath, LOG_TAIL_KB * 1024);
+        const recentErrors = safeJsonParseLines(tailText, 10);
+
+        // lineCount الحقيقي قد يحتاج قراءة كاملة (مكلف)، لذلك نضع تقديريًا أو "-"
+        logs[name] = {
+          exists: true,
+          size: stats.size,
+          sizeFormatted: formatBytes(stats.size),
+          modified: stats.mtime,
+          lineCount: '-', // لتخفيف الموارد
+          recentErrors
+        };
+      } else {
+        logs[name] = {
+          exists: true,
+          size: stats.size,
+          sizeFormatted: formatBytes(stats.size),
+          modified: stats.mtime,
+          lineCount: '-' // لتخفيف الموارد
+        };
       }
     } catch (error) {
       logs[name] = { exists: false, error: error.message };
@@ -231,33 +306,35 @@ function getLogsInfo() {
   return logs;
 }
 
-/**
- * جمع جميع إحصائيات المراقبة
- */
+// ============================================================================
+// جمع جميع إحصائيات المراقبة (Cache عام)
+// ============================================================================
 async function getMonitoringStats() {
-  const systemInfo = getSystemInfo();
-  const processInfo = getProcessInfo();
-  const databaseInfo = await getDatabaseInfo();
-  const logsInfo = getLogsInfo();
-
-  // إضافة الذاكرة الحالية للتاريخ
-  memoryHistory.push({
-    timestamp: Date.now(),
-    heapUsed: processInfo.memory.heapUsed,
-    heapTotal: processInfo.memory.heapTotal,
-    rss: processInfo.memory.rss,
-    percentage: (processInfo.memory.heapTotal > 0
-      ? ((processInfo.memory.heapUsed / processInfo.memory.heapTotal) * 100).toFixed(2)
-      : '0.00'
-    )
-  });
-
-  // الاحتفاظ بآخر MAX_HISTORY قياس
-  if (memoryHistory.length > MAX_HISTORY) {
-    memoryHistory = memoryHistory.slice(-MAX_HISTORY);
+  const now = nowMs();
+  if (statsCache.data && (now - statsCache.ts) < MONITOR_CACHE_TTL_MS) {
+    return statsCache.data;
   }
 
-  return {
+  const systemInfo = getSystemInfo();
+  const processInfo = getProcessInfo();
+  const databaseInfo = await getDatabaseInfoCached();
+  const logsInfo = await getLogsInfoCached();
+
+  // تاريخ الذاكرة (صغير)
+  const heapTotal = processInfo.memory.heapTotal || 0;
+  const heapUsed = processInfo.memory.heapUsed || 0;
+  const percentage = heapTotal ? ((heapUsed / heapTotal) * 100).toFixed(2) : '0.00';
+
+  memoryHistory.push({
+    timestamp: now,
+    heapUsed,
+    heapTotal,
+    rss: processInfo.memory.rss,
+    percentage
+  });
+  memoryHistory = clampArray(memoryHistory, MAX_HISTORY);
+
+  const data = {
     timestamp: new Date().toISOString(),
     system: systemInfo,
     process: processInfo,
@@ -273,105 +350,90 @@ async function getMonitoringStats() {
           obj[key] = value;
           return obj;
         }, {}),
-      errors: requestStats.errors.slice(-20), // آخر 20 خطأ
-      slowRequests: requestStats.slowRequests.slice(-10), // آخر 10 طلبات بطيئة
-      uptime: Date.now() - requestStats.startTime
+      errors: requestStats.errors.slice(-20),
+      slowRequests: requestStats.slowRequests.slice(-10),
+      uptime: now - requestStats.startTime
     },
     memory: {
       current: processInfo.memory,
-      history: memoryHistory.slice(-20) // آخر 20 قياس للعرض
+      history: memoryHistory.slice(-20)
     },
     logs: logsInfo
   };
+
+  statsCache = { ts: now, data };
+  return data;
 }
 
-/**
- * تسجيل طلب جديد
- */
-function recordRequest(method, path, statusCode, duration) {
+// ============================================================================
+// تسجيل طلب جديد
+// ============================================================================
+function recordRequest(method, reqPath, statusCode, duration) {
   requestStats.total++;
 
-  // حسب Method
-  requestStats.byMethod[method] = (requestStats.byMethod[method] || 0) + 1;
+  const m = String(method || '').toUpperCase();
+  requestStats.byMethod[m] = (requestStats.byMethod[m] || 0) + 1;
 
-  // حسب Status Code
-  const statusCategory = Math.floor(statusCode / 100) + 'xx';
+  const statusCategory = Math.floor((statusCode || 0) / 100) + 'xx';
   requestStats.byStatus[statusCategory] = (requestStats.byStatus[statusCategory] || 0) + 1;
 
-  // حسب Path
-  requestStats.byPath[path] = (requestStats.byPath[path] || 0) + 1;
+  const p = String(reqPath || '/');
+  requestStats.byPath[p] = (requestStats.byPath[p] || 0) + 1;
 
-  // تسجيل الأخطاء
   if (statusCode >= 400) {
     requestStats.errors.push({
       timestamp: new Date().toISOString(),
-      method,
-      path,
+      method: m,
+      path: p,
       statusCode,
       duration
     });
-
-    // الاحتفاظ بآخر 100 خطأ
-    if (requestStats.errors.length > 100) {
-      requestStats.errors = requestStats.errors.slice(-100);
-    }
+    requestStats.errors = clampArray(requestStats.errors, MAX_REQUEST_ERRORS);
   }
 
-  // تسجيل الطلبات البطيئة (> 1 ثانية)
-  if (duration > 1000) {
+  if (duration > SLOW_REQUEST_MS) {
     requestStats.slowRequests.push({
       timestamp: new Date().toISOString(),
-      method,
-      path,
+      method: m,
+      path: p,
       statusCode,
       duration
     });
-
-    // الاحتفاظ بآخر 50 طلب بطيء
-    if (requestStats.slowRequests.length > 50) {
-      requestStats.slowRequests = requestStats.slowRequests.slice(-50);
-    }
+    requestStats.slowRequests = clampArray(requestStats.slowRequests, MAX_SLOW_REQUESTS);
   }
 }
 
-/**
- * تسجيل استعلام قاعدة البيانات
- */
+// ============================================================================
+// تسجيل استعلام قاعدة البيانات
+// ============================================================================
 function recordQuery(duration, query, error = null) {
   dbStats.queries++;
+
+  const q = String(query || 'N/A').substring(0, 200);
 
   if (error) {
     dbStats.errors.push({
       timestamp: new Date().toISOString(),
-      query: (query || '').substring(0, 200), // أول 200 حرف
+      query: q,
       error: error.message,
       duration
     });
-
-    // الاحتفاظ بآخر 100 خطأ
-    if (dbStats.errors.length > 100) {
-      dbStats.errors = dbStats.errors.slice(-100);
-    }
+    dbStats.errors = clampArray(dbStats.errors, MAX_DB_ERRORS);
   }
 
-  // تسجيل الاستعلامات البطيئة (> 500ms)
-  if (duration > 500) {
+  if (duration > DB_SLOW_QUERY_MS) {
     dbStats.slowQueries.push({
       timestamp: new Date().toISOString(),
-      query: (query || '').substring(0, 200),
+      query: q,
       duration
     });
-
-    // الاحتفاظ بآخر 50 استعلام بطيء
-    if (dbStats.slowQueries.length > 50) {
-      dbStats.slowQueries = dbStats.slowQueries.slice(-50);
-    }
+    dbStats.slowQueries = clampArray(dbStats.slowQueries, MAX_DB_SLOW);
   }
 }
 
-/**
- * إعادة تعيين الإحصائيات
- */
+// ============================================================================
+// إعادة تعيين الإحصائيات
+// ============================================================================
 function resetStats() {
   requestStats = {
     total: 0,
@@ -390,32 +452,11 @@ function resetStats() {
   };
 
   memoryHistory = [];
-}
 
-/**
- * تنسيق البايتات
- */
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 Bytes';
-  const k = 1024;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-}
-
-/**
- * تنسيق الوقت
- */
-function formatUptime(seconds) {
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  if (days > 0) return `${days} يوم ${hours} ساعة ${minutes} دقيقة`;
-  if (hours > 0) return `${hours} ساعة ${minutes} دقيقة ${secs} ثانية`;
-  if (minutes > 0) return `${minutes} دقيقة ${secs} ثانية`;
-  return `${secs} ثانية`;
+  // تنظيف الكاشات أيضًا
+  statsCache = { ts: 0, data: null };
+  dbCache = { ts: 0, data: null };
+  logsCache = { ts: 0, data: null };
 }
 
 module.exports = {
