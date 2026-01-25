@@ -21,6 +21,7 @@ const {
 const { mapTransactionToAPI } = require('../utils/mappers');
 const { logAudit } = require('../services/auditService');
 const { resolveConflict } = require('../services/conflictResolver');
+const { sendTransactionNotification } = require('../services/fcmNotificationService');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 
@@ -351,6 +352,29 @@ async function syncTransaction(req, res, next) {
         req
       );
       
+      // ✅ إرسال إشعار FCM إذا كان notify_customer = true
+      if (transaction.notify_customer) {
+        try {
+          // جلب بيانات العميل والمالك في الخلفية
+          const [customerResult, ownerResult] = await Promise.all([
+            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
+            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
+          ]);
+          
+          const customer = customerResult.rows[0];
+          const owner = ownerResult.rows[0];
+          
+          if (customer && owner && customer.phone_number) {
+            // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
+            sendTransactionNotification(transaction, customer, owner)
+              .catch(err => logger.error('Background notification failed', err));
+          }
+        } catch (notifError) {
+          // لا نوقف العملية إذا فشل الإشعار
+          logger.error('Error preparing transaction notification', notifError);
+        }
+      }
+      
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
     } else {
       // الحصول على ownerUserId الصحيح
@@ -462,15 +486,38 @@ async function syncTransaction(req, res, next) {
       const transaction = result.rows[0];
       
       await logAudit(
-        transaction.owner_user_id,
-        transaction.owner_firebase_uid,
-        'create',
-        'transaction',
-        transaction.transaction_id.toString(),
-        null,
-        transaction,
+        transaction.owner_user_id, 
+        transaction.owner_firebase_uid, 
+        'create', 
+        'transaction', 
+        transaction.transaction_id.toString(), 
+        null, 
+        transaction, 
         req
       );
+      
+      // ✅ إرسال إشعار FCM إذا كان notify_customer = true
+      if (transaction.notify_customer) {
+        try {
+          // جلب بيانات العميل والمالك في الخلفية
+          const [customerResult, ownerResult] = await Promise.all([
+            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
+            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
+          ]);
+          
+          const customer = customerResult.rows[0];
+          const owner = ownerResult.rows[0];
+          
+          if (customer && owner && customer.phone_number) {
+            // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
+            sendTransactionNotification(transaction, customer, owner)
+              .catch(err => logger.error('Background notification failed', err));
+          }
+        } catch (notifError) {
+          // لا نوقف العملية إذا فشل الإشعار
+          logger.error('Error preparing transaction notification', notifError);
+        }
+      }
       
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
     }
@@ -580,6 +627,130 @@ async function deleteTransactionById(req, res, next) {
   }
 }
 
+/**
+ * GET /api/transactions/debt-summary
+ * الحصول على إحصائيات الديون (creditor summaries)
+ * Query params:
+ *   - currentUserPhone: رقم هاتف المستخدم الحالي
+ *   - currentUserId: معرف المستخدم الحالي (local ID)
+ *   - currentUserFirebaseUid: معرف Firebase للمستخدم الحالي
+ */
+async function getDebtSummary(req, res, next) {
+  try {
+    const { currentUserPhone, currentUserId, currentUserFirebaseUid } = req.query;
+    
+    if (!currentUserPhone && !currentUserFirebaseUid) {
+      return res.status(400).json({
+        success: false,
+        error: 'currentUserPhone أو currentUserFirebaseUid مطلوب'
+      });
+    }
+    
+    // البحث عن جميع العملاء برقم هاتف المستخدم الحالي
+    let clientsQuery = `
+      SELECT client_id, owner_user_id, owner_firebase_uid
+      FROM business_clients
+      WHERE phone_number = $1 AND deleted_at IS NULL
+    `;
+    const clientsParams = [currentUserPhone];
+    
+    if (currentUserFirebaseUid) {
+      clientsQuery += ` AND owner_firebase_uid != $2`;
+      clientsParams.push(currentUserFirebaseUid);
+    }
+    
+    const clientsResult = await pool.query(clientsQuery, clientsParams);
+    const clients = clientsResult.rows;
+    
+    if (clients.length === 0) {
+      return res.json({ success: true, data: [] });
+    }
+    
+    // تجميع المعاملات حسب ownerFirebaseUid (الدائن)
+    const creditorMap = new Map();
+    
+    for (const client of clients) {
+      const transactionsResult = await pool.query(
+        `SELECT ft.*, bc.client_name, bc.phone_number
+         FROM financial_transactions ft
+         JOIN business_clients bc ON ft.client_id = bc.client_id
+         WHERE ft.client_id = $1 
+           AND ft.owner_firebase_uid != $2
+           AND ft.deleted_at IS NULL
+         ORDER BY ft.transaction_date DESC`,
+        [client.client_id, currentUserFirebaseUid || '']
+      );
+      
+      for (const transaction of transactionsResult.rows) {
+        const creditorUid = transaction.owner_firebase_uid;
+        if (!creditorUid || creditorUid === currentUserFirebaseUid) continue;
+        
+        if (!creditorMap.has(creditorUid)) {
+          creditorMap.set(creditorUid, {
+            creditorFirebaseUid: creditorUid,
+            transactions: [],
+            totalDebit: 0,
+            totalCredit: 0,
+            balancesByCurrency: {}
+          });
+        }
+        
+        const summary = creditorMap.get(creditorUid);
+        summary.transactions.push(transaction);
+        
+        const amount = parseFloat(transaction.transaction_amount);
+        const currency = transaction.currency_code || 'IQD';
+        
+        if (transaction.transaction_direction === 'DEBIT') {
+          summary.totalDebit += amount;
+          summary.balancesByCurrency[currency] = (summary.balancesByCurrency[currency] || 0) - amount;
+        } else {
+          summary.totalCredit += amount;
+          summary.balancesByCurrency[currency] = (summary.balancesByCurrency[currency] || 0) + amount;
+        }
+      }
+    }
+    
+    // جلب بيانات الدائنين من جدول app_users
+    const creditors = [];
+    for (const [creditorUid, summary] of creditorMap.entries()) {
+      const userResult = await pool.query(
+        'SELECT user_id, name, phone, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
+        [creditorUid]
+      );
+      
+      const user = userResult.rows[0];
+      if (!user) continue;
+      
+      const netBalance = summary.totalCredit - summary.totalDebit;
+      const lastTransaction = summary.transactions[0]; // تم ترتيبها DESC
+      
+      creditors.push({
+        creditorName: user.name || 'مستخدم مجهول',
+        creditorPhone: user.phone || '',
+        creditorJobTitle: user.job_title || null,
+        creditorFirebaseUid: creditorUid,
+        totalDebit: summary.totalDebit,
+        totalCredit: summary.totalCredit,
+        netBalance: netBalance,
+        transactionCount: summary.transactions.length,
+        currency: lastTransaction.currency_code || 'IQD',
+        lastTransactionDate: lastTransaction.transaction_date ? 
+          Math.floor(new Date(lastTransaction.transaction_date).getTime()) : 
+          Date.now(),
+        balancesByCurrency: summary.balancesByCurrency
+      });
+    }
+    
+    // ترتيب حسب تاريخ آخر معاملة
+    creditors.sort((a, b) => b.lastTransactionDate - a.lastTransactionDate);
+    
+    res.json({ success: true, data: creditors });
+  } catch (error) {
+    next(error);
+  }
+}
+
 module.exports = {
   getTransactions,
   getTransactionByUuid,
@@ -587,6 +758,7 @@ module.exports = {
   createTransaction,
   syncTransaction,
   deleteTransactionByUuid,
-  deleteTransactionById
+  deleteTransactionById,
+  getDebtSummary
 };
 
