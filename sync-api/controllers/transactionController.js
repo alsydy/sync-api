@@ -751,7 +751,11 @@ async function getDebtSummary(req, res, next) {
         const amount = parseFloat(transaction.transaction_amount);
         const currency = transaction.currency_code || 'IQD';
         
-        if (transaction.transaction_direction === 'DEBIT') {
+        // ✅ قاعدة البيانات تحفظ income/expense، لكن نحتاج DEBIT/CREDIT
+        const direction = transaction.transaction_direction;
+        const isDebit = direction === 'expense' || direction === 'DEBIT';
+        
+        if (isDebit) {
           summary.totalDebit += amount;
           summary.balancesByCurrency[currency] = (summary.balancesByCurrency[currency] || 0) - amount;
         } else {
