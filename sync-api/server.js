@@ -77,6 +77,10 @@ const settingsRoutes = require('./routes/settings');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// ✅ Trust proxy (مطلوب عند العمل خلف proxy مثل Render.com)
+// هذا يسمح لـ express-rate-limit بقراءة X-Forwarded-For header بشكل صحيح
+app.set('trust proxy', true);
+
 // ==================== 2. Middleware ====================
 
 // Security
