@@ -697,16 +697,45 @@ async function getDebtSummary(req, res, next) {
     }
     
     // البحث عن جميع العملاء برقم هاتف المستخدم الحالي
-    let clientsQuery = `
-      SELECT client_id, owner_user_id, owner_firebase_uid
-      FROM business_clients
-      WHERE phone_number = $1 AND deleted_at IS NULL
-    `;
-    const clientsParams = [currentUserPhone];
+    let clientsQuery = '';
+    let clientsParams = [];
     
-    if (currentUserFirebaseUid) {
-      clientsQuery += ` AND owner_firebase_uid != $2`;
-      clientsParams.push(currentUserFirebaseUid);
+    if (currentUserPhone) {
+      // ✅ إذا كان currentUserPhone موجوداً، استخدمه
+      clientsQuery = `
+        SELECT client_id, owner_user_id, owner_firebase_uid
+        FROM business_clients
+        WHERE phone_number = $1 AND deleted_at IS NULL
+      `;
+      clientsParams = [currentUserPhone];
+      
+      if (currentUserFirebaseUid) {
+        clientsQuery += ` AND owner_firebase_uid != $2`;
+        clientsParams.push(currentUserFirebaseUid);
+      }
+    } else if (currentUserFirebaseUid) {
+      // ✅ إذا كان currentUserFirebaseUid موجوداً فقط، استخدمه للبحث عن المستخدم ثم عملائه
+      const userResult = await pool.query(
+        'SELECT phone_number FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
+        [currentUserFirebaseUid]
+      );
+      
+      if (userResult.rows.length === 0) {
+        return res.json({ success: true, data: [] });
+      }
+      
+      const userPhone = userResult.rows[0].phone_number;
+      if (!userPhone) {
+        return res.json({ success: true, data: [] });
+      }
+      
+      clientsQuery = `
+        SELECT client_id, owner_user_id, owner_firebase_uid
+        FROM business_clients
+        WHERE phone_number = $1 AND deleted_at IS NULL
+          AND owner_firebase_uid != $2
+      `;
+      clientsParams = [userPhone, currentUserFirebaseUid];
     }
     
     const clientsResult = await pool.query(clientsQuery, clientsParams);
