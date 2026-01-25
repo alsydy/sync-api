@@ -80,14 +80,29 @@ const PORT = process.env.PORT || 3001;
 // ==================== 2. Middleware ====================
 
 // Security
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
+// Security (Helmet) - CSP صارم + استثناء للمراقبة فقط
+app.use((req, res, next) => {
+  const p = req.path || '';
+  const isMonitoringPage = (p === '/api/monitoring' || p === '/api/monitoring/');
+
+  const baseHelmet = helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        defaultSrc: ["'self'"],
+        // نسمح بالـ inline styles لأن صفحة المراقبة تستخدم CSS inline
+        styleSrc: ["'self'", "'unsafe-inline'"],
+
+        // مهم: لا نسمح inline scripts بشكل عام
+        // ونسمح به فقط في صفحة المراقبة
+        scriptSrc: isMonitoringPage ? ["'self'", "'unsafe-inline'"] : ["'self'"],
+      },
     },
-  },
-}));
+  });
+
+  return baseHelmet(req, res, next);
+});
+
 
 // CORS
 app.use(cors({
