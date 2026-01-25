@@ -431,17 +431,36 @@ async function normalizeAccountId(accountId, accountFirestoreId) {
 
 /**
  * تحويل transaction direction إلى صيغة صحيحة
+ * قاعدة البيانات تستخدم: income/expense
+ * التطبيق يرسل: DEBIT/CREDIT
+ * 
+ * التحويل:
+ * - DEBIT → expense (مدين)
+ * - CREDIT → income (دائن)
+ * - income → income (للتوافق)
+ * - expense → expense (للتوافق)
  */
 function normalizeTransactionDirection(direction) {
   if (!direction) return 'expense';
   
-  const normalized = direction.toLowerCase().trim();
-  if (normalized === 'income' || normalized === 'expense') {
-    return normalized;
+  const normalized = direction.toUpperCase().trim();
+  
+  // الصيغة الجديدة من التطبيق (DEBIT/CREDIT) → تحويل إلى income/expense
+  if (normalized === 'DEBIT') {
+    return 'expense'; // DEBIT = expense (مدين)
+  }
+  if (normalized === 'CREDIT') {
+    return 'income'; // CREDIT = income (دائن)
   }
   
-  logger.warning('Unknown transaction direction', { direction });
-  return 'expense';
+  // الصيغة القديمة (income/expense) - للتوافق
+  const lowerNormalized = normalized.toLowerCase();
+  if (lowerNormalized === 'income' || lowerNormalized === 'expense') {
+    return lowerNormalized;
+  }
+  
+  logger.warning('Unknown transaction direction', { direction, normalized });
+  return 'expense'; // القيمة الافتراضية
 }
 
 module.exports = {
