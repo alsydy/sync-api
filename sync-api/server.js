@@ -28,6 +28,7 @@ const {
   generateToken 
 } = require('./middleware/auth');
 const { errorHandler } = require('./middleware/errorHandler');
+const { monitoringMiddleware } = require('./middleware/monitoring');
 
 // Import utils
 const {
@@ -64,6 +65,7 @@ const { logAudit } = require('./services/auditService');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const healthRoutes = require('./routes/health');
+const monitoringRoutes = require('./routes/monitoring');
 const clientRoutes = require('./routes/clients');
 const accountRoutes = require('./routes/accounts');
 const transactionRoutes = require('./routes/transactions');
@@ -116,6 +118,9 @@ app.use((req, res, next) => {
   next();
 });
 
+// Monitoring middleware (يجب أن يكون بعد Request ID)
+app.use(monitoringMiddleware);
+
 // Timeout handler
 app.use((req, res, next) => {
   if (!req.timedout) next();
@@ -126,6 +131,9 @@ app.use((req, res, next) => {
 // Health & Info routes (before /api prefix)
 app.use('/', healthRoutes);
 app.use('/api', healthRoutes);
+
+// Monitoring routes
+app.use('/api/monitoring', monitoringRoutes);
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -353,63 +361,7 @@ app.post('/api/account-numbers/next', async (req, res) => {
 // ==================== 9. Routes - Transactions ====================
 // ملاحظة: Routes للمعاملات موجودة الآن في routes/transactions.js
 // تم نقل Routes إلى routes/transactions.js (تستخدم controllers)
-  try {
-    const { ownerUserId, ownerFirebaseUid, customerId, clientId, accountId, synced, limit, offset, sinceTimestamp } = req.query;
-    
-    let query = 'SELECT * FROM financial_transactions WHERE deleted_at IS NULL';
-    const params = [];
-    let paramIndex = 1;
-    
-    if (ownerUserId) {
-      query += ` AND owner_user_id = $${paramIndex++}`;
-      params.push(ownerUserId);
-    }
-    if (ownerFirebaseUid) {
-      query += ` AND owner_firebase_uid = $${paramIndex++}`;
-      params.push(ownerFirebaseUid);
-    }
-    if (customerId || clientId) {
-      query += ` AND client_id = $${paramIndex++}`;
-      params.push(customerId || clientId);
-    }
-    if (accountId) {
-      query += ` AND account_id = $${paramIndex++}`;
-      params.push(accountId);
-    }
-    if (synced !== undefined) {
-      query += ` AND is_synced = $${paramIndex++}`;
-      params.push(intToBoolean(synced));
-    }
-    
-    // ✅ دعم المزامنة التزايدية: جلب البيانات المحدثة بعد timestamp معين
-    if (sinceTimestamp) {
-      const sinceSeconds = msToSeconds(parseInt(sinceTimestamp));
-      if (sinceSeconds) {
-        query += ` AND updated_at > to_timestamp($${paramIndex++})`;
-        params.push(sinceSeconds);
-      }
-    }
-    
-    query += ' ORDER BY updated_at DESC, transaction_date DESC, created_at DESC';
-    
-    if (limit) {
-      query += ` LIMIT $${paramIndex++}`;
-      params.push(parseInt(limit));
-    }
-    if (offset) {
-      query += ` OFFSET $${paramIndex++}`;
-      params.push(parseInt(offset));
-    }
-    
-    const result = await pool.query(query, params);
-    
-    const transactions = result.rows.map(row => mapTransactionToAPI(row));
-    
-    res.json({ success: true, data: transactions, count: transactions.length });
-  } catch (error) {
-    handleError(res, error);
-  }
-});
+// تم إزالة الكود المكرر - الآن نعتمد فقط على routes من الملفات المنفصلة
 
 /**
  * GET /api/transactions/by-uuid/:transactionUuid
