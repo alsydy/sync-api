@@ -39,5 +39,11 @@ router.delete('/by-uuid/:clientUuid', optionalAuthenticate, clientController.del
  */
 router.put('/sync', syncLimiter, optionalAuthenticate, clientController.syncClient);
 
+/**
+ * GET /api/clients/by-phone/:phoneNumber
+ * البحث عن جميع العملاء برقم الهاتف (للمتابعة الديون)
+ */
+router.get('/by-phone/:phoneNumber', optionalAuthenticate, clientController.getClientsByPhone);
+
 module.exports = router;
 
