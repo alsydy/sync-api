@@ -270,468 +270,425 @@ function getMonitoringHTML() {
         <div class="refresh-info" id="refreshInfo"></div>
     </div>
 
-    <script>
-        let autoRefreshInterval;
-        let autoRefreshEnabled = true;
-        let lastData = null;
+<script>
+    let autoRefreshInterval;
+    let autoRefreshEnabled = true;
+    let lastData = null;
 
-        // =========================
-        // ✅ قاموس ترجمة للعرض
-        // =========================
-        const AR_MAP = {
-            platform: {
-                linux: 'لينكس',
-                win32: 'ويندوز',
-                darwin: 'ماك'
-            },
-            arch: {
-                x64: '64-بت',
-                arm64: 'ARM 64-بت',
-                arm: 'ARM'
-            },
-            method: {
-                GET: 'جلب',
-                POST: 'إرسال',
-                PUT: 'تحديث',
-                DELETE: 'حذف',
-                PATCH: 'تعديل',
-                HEAD: 'رأس',
-                OPTIONS: 'خيارات'
-            },
-            status: {
-                '2xx': 'نجاح',
-                '3xx': 'إعادة توجيه',
-                '4xx': 'خطأ عميل',
-                '5xx': 'خطأ خادم'
-            },
-            logs: {
-                error: 'أخطاء',
-                combined: 'مشترك',
-                exceptions: 'استثناءات',
-                rejections: 'رفض الوعود'
-            }
-        };
+    // ✅ ECO SETTINGS
+    const ECO_REFRESH_MS = 30000; // 30 ثانية (مناسب لسيرفر 1GB)
+    let inFlight = false;         // لمنع تداخل الطلبات
 
-        function arValue(group, key) {
-            const v = AR_MAP[group] && AR_MAP[group][key];
-            return v ? \`\${v} (\${key})\` : key;
-        }
+    // =========================
+    // ✅ قاموس ترجمة للعرض
+    // =========================
+    const AR_MAP = {
+        platform: { linux: 'لينكس', win32: 'ويندوز', darwin: 'ماك' },
+        arch: { x64: '64-بت', arm64: 'ARM 64-بت', arm: 'ARM' },
+        method: { GET: 'جلب', POST: 'إرسال', PUT: 'تحديث', DELETE: 'حذف', PATCH: 'تعديل', HEAD: 'رأس', OPTIONS: 'خيارات' },
+        status: { '2xx': 'نجاح', '3xx': 'إعادة توجيه', '4xx': 'خطأ عميل', '5xx': 'خطأ خادم' },
+        logs: { error: 'أخطاء', combined: 'مشترك', exceptions: 'استثناءات', rejections: 'رفض الوعود' }
+    };
 
-        function arPlatform(p) { return arValue('platform', String(p || '')); }
-        function arArch(a) { return arValue('arch', String(a || '')); }
-        function arMethod(m) { return arValue('method', String(m || '').toUpperCase()); }
-        function arStatus(s) { return arValue('status', String(s || '')); }
-        function arLogName(n) { return arValue('logs', String(n || '')); }
+    function arValue(group, key) {
+        const v = AR_MAP[group] && AR_MAP[group][key];
+        return v ? `${v} (${key})` : key;
+    }
+    function arPlatform(p) { return arValue('platform', String(p || '')); }
+    function arArch(a) { return arValue('arch', String(a || '')); }
+    function arMethod(m) { return arValue('method', String(m || '').toUpperCase()); }
+    function arStatus(s) { return arValue('status', String(s || '')); }
+    function arLogName(n) { return arValue('logs', String(n || '')); }
 
-        window.addEventListener('DOMContentLoaded', () => {
-            loadData();
-            startAutoRefresh();
-        });
+    window.addEventListener('DOMContentLoaded', () => {
+        // تحميل أولي
+        loadData();
+        startAutoRefresh();
+    });
 
-        function startAutoRefresh() {
-            stopAutoRefresh();
-            autoRefreshInterval = setInterval(() => {
-                if (autoRefreshEnabled) loadData();
-            }, 5000);
-        }
-
-        function stopAutoRefresh() {
-            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
-            autoRefreshInterval = null;
-        }
-
-        function toggleAutoRefresh() {
-            autoRefreshEnabled = !autoRefreshEnabled;
-            document.getElementById('autoBtn').textContent = autoRefreshEnabled ? '⏸️ إيقاف التحديث' : '▶️ تشغيل التحديث';
-        }
-
-        // ✅ إصلاح المسارات: يعمل سواء كان الرابط /api/monitoring أو /api/monitoring/
-        function apiUrl(subPath) {
-            let base = window.location.pathname || '/';
-            if (!base.endsWith('/')) base += '/';
-            return base + String(subPath || '').replace(/^\\/+/, '');
-        }
-
-        // ✅ Timeout للـ fetch حتى لا يعلق "جاري التحميل"
-        async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
-            const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), timeoutMs);
-            try {
-                const res = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
-                return res;
-            } finally {
-                clearTimeout(id);
-            }
-        }
-
-        async function loadData() {
-            try {
-                const response = await fetchWithTimeout(apiUrl('stats'), {}, 8000);
-                const result = await response.json();
-
-                if (result.success) {
-                    lastData = result.data;
-                    displayStats(result.data);
-                    updateRefreshInfo();
-                } else {
-                    document.getElementById('statsContainer').innerHTML =
-                        '<div class="card full-width"><p class="dangerText">خطأ في تحميل البيانات</p></div>';
-                    setStatus('bad', 'خطأ في تحميل البيانات');
-                }
-            } catch (error) {
-                console.error('Error loading data:', error);
-                document.getElementById('statsContainer').innerHTML =
-                    '<div class="card full-width"><p class="dangerText">تعذر تحميل البيانات. جرّب تحديث الصفحة.</p></div>';
-                setStatus('bad', (error && error.name === 'AbortError') ? 'انتهت مهلة التحميل' : 'لا يمكن الاتصال بالخادم');
-            }
-        }
-
-        function setStatus(level, text) {
-            const dot = document.getElementById('statusDot');
-            const st = document.getElementById('statusText');
-
-            dot.className = 'status-indicator ' + (level || '');
-            st.className = 'status-text ' + (level || '');
-            st.textContent = text || '...';
-        }
-
-        function computeOverallStatus(data) {
-            if (!data) return { level: 'warn', text: 'جاري التحميل...' };
-
-            const dbOk = !!(data.database && data.database.connected);
-            const hasReqErrors = (data.requests && Array.isArray(data.requests.errors) && data.requests.errors.length > 0);
-            const has5xx = data.requests && data.requests.byStatus && (data.requests.byStatus['5xx'] > 0);
-
-            if (!dbOk || has5xx) {
-                return { level: 'bad', text: 'يوجد مشكلة (قاعدة البيانات/أخطاء 5xx)' };
-            }
-            if (hasReqErrors) {
-                return { level: 'warn', text: 'تحذير: توجد أخطاء طلبات' };
-            }
-            return { level: 'ok', text: 'الخادم يعمل بشكل طبيعي' };
-        }
-
-        function displayStats(data) {
-            const overall = computeOverallStatus(data);
-            setStatus(overall.level, overall.text);
-
-            const container = document.getElementById('statsContainer');
-
-            const heapRatio = safeDivide(data.process.memory.heapUsed, data.process.memory.heapTotal);
-            const heapPct = (heapRatio * 100).toFixed(2);
-            const ramPct = Number(data.system.memory.percentage || 0).toFixed(2);
-
-            container.innerHTML = \`
-                <!-- معلومات النظام -->
-                <div class="card">
-                    <h2>💻 معلومات النظام</h2>
-                    <div class="stat-item">
-                        <span class="stat-label">النظام:</span>
-                        <span class="stat-value">\${arPlatform(data.system.platform)} — \${arArch(data.system.arch)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">Node.js:</span>
-                        <span class="stat-value">\${data.system.nodeVersion}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">مدة التشغيل (Uptime):</span>
-                        <span class="stat-value">\${formatUptime(data.system.uptime)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">المعالج (CPU):</span>
-                        <span class="stat-value">\${data.system.cpu.cores} نواة</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">متوسط الضغط (Load Avg):</span>
-                        <span class="stat-value">\${(data.system.loadAverage || []).map(n => Number(n).toFixed(2)).join(' , ')}</span>
-                    </div>
-                </div>
-
-                <!-- استخدام الذاكرة -->
-                <div class="card">
-                    <h2>🧠 الذاكرة</h2>
-                    <div class="stat-item">
-                        <span class="stat-label">ذاكرة النظام (RAM):</span>
-                        <span class="stat-value">\${ramPct}%</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">RSS:</span>
-                        <span class="stat-value">\${formatBytes(data.process.memory.rss)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">Heap المستخدم:</span>
-                        <span class="stat-value">\${formatBytes(data.process.memory.heapUsed)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">Heap الكلي:</span>
-                        <span class="stat-value">\${formatBytes(data.process.memory.heapTotal)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">نسبة Heap:</span>
-                        <span class="stat-value">\${heapPct}%</span>
-                    </div>
-                    <div class="progress-bar">
-                        <div class="progress-fill \${getProgressClass(heapRatio)}"
-                             style="width: \${Math.min(100, Math.max(0, heapRatio * 100))}%"></div>
-                    </div>
-                    <div class="small muted" style="margin-top:8px;">
-                        ملاحظة: نسبة Heap تختلف عن نسبة RAM للنظام
-                    </div>
-                </div>
-
-                <!-- قاعدة البيانات -->
-                <div class="card">
-                    <h2>🗄️ قاعدة البيانات</h2>
-
-                    <div class="stat-item">
-                        <span class="stat-label">الحالة:</span>
-                        <span class="stat-value">
-                            <span class="badge \${data.database.connected ? 'badge-success' : 'badge-danger'}">
-                                \${data.database.connected ? 'متصل' : 'غير متصل'}
-                            </span>
-                        </span>
-                    </div>
-
-                    \${data.database.connected ? \`
-                        <div class="stat-item">
-                            <span class="stat-label">الإصدار:</span>
-                            <span class="stat-value">\${data.database.version}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">حجم القاعدة:</span>
-                            <span class="stat-value">\${data.database.size || 'N/A'}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">اتصالات DB:</span>
-                            <span class="stat-value">\${data.database.connections.active} نشط / \${data.database.connections.total} إجمالي</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">Pool:</span>
-                            <span class="stat-value">\${data.database.pool.totalCount} total | \${data.database.pool.idleCount} idle | \${data.database.pool.waitingCount} wait</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">الحد الأقصى للاتصالات (Max):</span>
-                            <span class="stat-value">\${data.database.pool.max}</span>
-                        </div>
-                        <div class="stat-item">
-                            <span class="stat-label">الاستعلامات (Queries):</span>
-                            <span class="stat-value">\${data.database.queries.total} (بطيئة: \${data.database.queries.slow}, أخطاء: \${data.database.queries.errors})</span>
-                        </div>
-                        \${data.database.warning ? \`
-                          <div class="warning-item">
-                            <div class="small warningText"><b>تنبيه DB:</b> \${escapeHtml(data.database.warning)}</div>
-                          </div>
-                        \` : '' }
-                    \` : \`
-                        <div class="stat-item">
-                            <span class="stat-label">الخطأ:</span>
-                            <span class="stat-value dangerText wrap">\${escapeHtml(data.database.error || 'N/A')}</span>
-                        </div>
-                        \${data.database.pool ? \`
-                        <div class="stat-item">
-                            <span class="stat-label">Pool:</span>
-                            <span class="stat-value">\${data.database.pool.totalCount} total | \${data.database.pool.idleCount} idle | \${data.database.pool.waitingCount} wait</span>
-                        </div>\` : '' }
-                    \`}
-                </div>
-
-                <!-- إحصائيات الطلبات -->
-                <div class="card">
-                    <h2>📊 الطلبات</h2>
-                    <div class="stat-item">
-                        <span class="stat-label">إجمالي الطلبات:</span>
-                        <span class="stat-value">\${data.requests.total}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">مدة التشغيل (Uptime):</span>
-                        <span class="stat-value">\${formatUptime(data.requests.uptime / 1000)}</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">الأخطاء (Errors):</span>
-                        <span class="stat-value">
-                            <span class="badge \${data.requests.errors.length > 0 ? 'badge-danger' : 'badge-success'}">
-                                \${data.requests.errors.length}
-                            </span>
-                        </span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">طلبات بطيئة:</span>
-                        <span class="stat-value">
-                            <span class="badge \${data.requests.slowRequests.length > 0 ? 'badge-warning' : 'badge-success'}">
-                                \${data.requests.slowRequests.length}
-                            </span>
-                        </span>
-                    </div>
-                </div>
-
-                <!-- الطلبات حسب Method -->
-                <div class="card">
-                    <h2>📤 حسب النوع (Method)</h2>
-                    \${Object.entries(data.requests.byMethod || {}).map(([method, count]) => \`
-                        <div class="stat-item">
-                            <span class="stat-label">\${arMethod(method)}:</span>
-                            <span class="stat-value">\${count}</span>
-                        </div>
-                    \`).join('') || '<div class="muted">لا توجد بيانات</div>'}
-                </div>
-
-                <!-- الطلبات حسب Status -->
-                <div class="card">
-                    <h2>📈 حسب الحالة (Status)</h2>
-                    \${Object.entries(data.requests.byStatus || {}).map(([status, count]) => \`
-                        <div class="stat-item">
-                            <span class="stat-label">\${arStatus(status)}:</span>
-                            <span class="stat-value">\${count}</span>
-                        </div>
-                    \`).join('') || '<div class="muted">لا توجد بيانات</div>'}
-                </div>
-
-                <!-- المسارات الأكثر استخداماً -->
-                <div class="card">
-                    <h2>🔗 أشهر المسارات</h2>
-                    \${Object.entries(data.requests.byPath || {}).slice(0, 10).map(([p, count]) => \`
-                        <div class="stat-item">
-                            <span class="stat-label small">\${escapeHtml(p)}:</span>
-                            <span class="stat-value">\${count}</span>
-                        </div>
-                    \`).join('') || '<div class="muted">لا توجد بيانات</div>'}
-                </div>
-
-                <!-- الطلبات البطيئة -->
-                <div class="card full-width">
-                    <h2>🐢 الطلبات البطيئة</h2>
-                    <div class="error-list">
-                        \${(data.requests.slowRequests && data.requests.slowRequests.length > 0)
-                          ? data.requests.slowRequests.slice(-10).reverse().map(req => \`
-                            <div class="warning-item">
-                              <div class="error-time">\${new Date(req.timestamp).toLocaleString('ar-SA')}</div>
-                              <div class="warningText"><b>\${arMethod(req.method)}</b> \${escapeHtml(req.path)} - \${req.statusCode} (\${req.duration}ms)</div>
-                            </div>\`).join('')
-                          : '<p style="color:#10b981; text-align:center; padding: 20px;">لا توجد طلبات بطيئة 🎉</p>'}
-                    </div>
-                </div>
-
-                <!-- الأخطاء الأخيرة -->
-                <div class="card full-width">
-                    <h2>❌ أخطاء الطلبات</h2>
-                    <div class="error-list">
-                        \${(data.requests.errors && data.requests.errors.length > 0)
-                          ? data.requests.errors.slice(-10).reverse().map(error => \`
-                            <div class="error-item">
-                                <div class="error-time">\${new Date(error.timestamp).toLocaleString('ar-SA')}</div>
-                                <div class="error-message">\${arMethod(error.method)} \${escapeHtml(error.path)} - \${error.statusCode} (\${error.duration}ms)</div>
-                            </div>\`).join('')
-                          : '<p style="color:#10b981; text-align:center; padding: 20px;">لا توجد أخطاء 🎉</p>'}
-                    </div>
-                </div>
-
-                <!-- معلومات السجلات -->
-                <div class="card full-width">
-                    <h2>📝 السجلات</h2>
-                    <table class="table">
-                        <thead>
-                            <tr>
-                                <th>الملف</th>
-                                <th>الحجم</th>
-                                <th>عدد الأسطر</th>
-                                <th>آخر تعديل</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            \${Object.entries(data.logs || {}).map(([name, info]) => \`
-                                <tr>
-                                    <td>\${escapeHtml(arLogName(name))}.log</td>
-                                    <td>\${info && info.exists ? info.sizeFormatted : 'غير موجود'}</td>
-                                    <td>\${info && info.exists ? info.lineCount : '-'}</td>
-                                    <td>\${info && info.exists ? new Date(info.modified).toLocaleString('ar-SA') : '-'}</td>
-                                </tr>
-                            \`).join('')}
-                        </tbody>
-                    </table>
-                </div>
-            \`;
-        }
-
-        function updateRefreshInfo() {
-            const now = new Date();
-            document.getElementById('refreshInfo').textContent =
-                \`آخر تحديث: \${now.toLocaleString('ar-SA')} - التحديث التلقائي كل 5 ثوانٍ\`;
-        }
-
-        function refreshData() {
-            loadData();
-        }
-
-        async function resetAllStats() {
-            if (!confirm('هل أنت متأكد من إعادة تعيين جميع الإحصائيات؟')) return;
-
-            const wasEnabled = autoRefreshEnabled;
+    // ✅ ECO: وقف التحديث إذا الصفحة مخفية، وارجع حدث فورًا عند الرجوع
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
             autoRefreshEnabled = false;
+        } else {
+            autoRefreshEnabled = true;
+            // تحديث فوري عند الرجوع
+            loadData();
+        }
+        updateAutoBtnText();
+    });
 
-            try {
-                const response = await fetchWithTimeout(apiUrl('reset'), { method: 'POST' }, 8000);
-                const result = await response.json();
+    // ✅ ECO: تحديث النص على الزر حسب الحالة
+    function updateAutoBtnText() {
+        const btn = document.getElementById('autoBtn');
+        if (!btn) return;
+        btn.textContent = autoRefreshEnabled ? '⏸️ إيقاف التحديث' : '▶️ تشغيل التحديث';
+    }
 
-                if (result.success) {
-                    alert('تم إعادة تعيين الإحصائيات بنجاح');
-                    await loadData();
-                } else {
-                    alert('خطأ في إعادة تعيين الإحصائيات');
-                }
-            } catch (error) {
-                console.error('Error resetting stats:', error);
-                alert((error && error.name === 'AbortError') ? 'انتهت مهلة الاتصال' : 'خطأ في الاتصال بالخادم');
-            } finally {
-                autoRefreshEnabled = wasEnabled;
+    function startAutoRefresh() {
+        stopAutoRefresh();
+        autoRefreshInterval = setInterval(() => {
+            if (autoRefreshEnabled) loadData();
+        }, ECO_REFRESH_MS);
+        updateAutoBtnText();
+    }
+
+    function stopAutoRefresh() {
+        if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+    }
+
+    function toggleAutoRefresh() {
+        autoRefreshEnabled = !autoRefreshEnabled;
+        updateAutoBtnText();
+        // لو شغّلته الآن، حدث فورًا بدل الانتظار 30 ثانية
+        if (autoRefreshEnabled) loadData();
+    }
+
+    // ✅ إصلاح المسارات: يعمل سواء كان الرابط /api/monitoring أو /api/monitoring/
+    function apiUrl(subPath) {
+        let base = window.location.pathname || '/';
+        if (!base.endsWith('/')) base += '/';
+        return base + String(subPath || '').replace(/^\/+/, '');
+    }
+
+    // ✅ Timeout للـ fetch حتى لا يعلق "جاري التحميل"
+    async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            const res = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
+            return res;
+        } finally {
+            clearTimeout(id);
+        }
+    }
+
+    async function loadData() {
+        // ✅ ECO: لا تبدأ طلب جديد إذا طلب سابق لم ينتهِ
+        if (inFlight) return;
+        inFlight = true;
+
+        try {
+            const response = await fetchWithTimeout(apiUrl('stats'), {}, 8000);
+            const result = await response.json();
+
+            if (result.success) {
+                lastData = result.data;
+                displayStats(result.data);
+                updateRefreshInfo();
+            } else {
+                document.getElementById('statsContainer').innerHTML =
+                    '<div class="card full-width"><p class="dangerText">خطأ في تحميل البيانات</p></div>';
+                setStatus('bad', 'خطأ في تحميل البيانات');
             }
+        } catch (error) {
+            console.error('Error loading data:', error);
+            document.getElementById('statsContainer').innerHTML =
+                '<div class="card full-width"><p class="dangerText">تعذر تحميل البيانات. جرّب تحديث الصفحة.</p></div>';
+            setStatus('bad', (error && error.name === 'AbortError') ? 'انتهت مهلة التحميل' : 'لا يمكن الاتصال بالخادم');
+        } finally {
+            inFlight = false;
         }
+    }
 
-        function formatBytes(bytes) {
-            if (!bytes) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    function setStatus(level, text) {
+        const dot = document.getElementById('statusDot');
+        const st = document.getElementById('statusText');
+        dot.className = 'status-indicator ' + (level || '');
+        st.className = 'status-text ' + (level || '');
+        st.textContent = text || '...';
+    }
+
+    function computeOverallStatus(data) {
+        if (!data) return { level: 'warn', text: 'جاري التحميل...' };
+        const dbOk = !!(data.database && data.database.connected);
+        const hasReqErrors = (data.requests && Array.isArray(data.requests.errors) && data.requests.errors.length > 0);
+        const has5xx = data.requests && data.requests.byStatus && (data.requests.byStatus['5xx'] > 0);
+
+        if (!dbOk || has5xx) return { level: 'bad', text: 'يوجد مشكلة (قاعدة البيانات/أخطاء 5xx)' };
+        if (hasReqErrors) return { level: 'warn', text: 'تحذير: توجد أخطاء طلبات' };
+        return { level: 'ok', text: 'الخادم يعمل بشكل طبيعي' };
+    }
+
+    function displayStats(data) {
+        const overall = computeOverallStatus(data);
+        setStatus(overall.level, overall.text);
+
+        const container = document.getElementById('statsContainer');
+        const heapRatio = safeDivide(data.process.memory.heapUsed, data.process.memory.heapTotal);
+        const heapPct = (heapRatio * 100).toFixed(2);
+        const ramPct = Number(data.system.memory.percentage || 0).toFixed(2);
+
+        container.innerHTML = `
+            <div class="card">
+                <h2>💻 معلومات النظام</h2>
+                <div class="stat-item">
+                    <span class="stat-label">النظام:</span>
+                    <span class="stat-value">${arPlatform(data.system.platform)} — ${arArch(data.system.arch)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Node.js:</span>
+                    <span class="stat-value">${data.system.nodeVersion}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">مدة التشغيل (Uptime):</span>
+                    <span class="stat-value">${formatUptime(data.system.uptime)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">المعالج (CPU):</span>
+                    <span class="stat-value">${data.system.cpu.cores} نواة</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">متوسط الضغط (Load Avg):</span>
+                    <span class="stat-value">${(data.system.loadAverage || []).map(n => Number(n).toFixed(2)).join(' , ')}</span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🧠 الذاكرة</h2>
+                <div class="stat-item">
+                    <span class="stat-label">ذاكرة النظام (RAM):</span>
+                    <span class="stat-value">${ramPct}%</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">RSS:</span>
+                    <span class="stat-value">${formatBytes(data.process.memory.rss)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Heap المستخدم:</span>
+                    <span class="stat-value">${formatBytes(data.process.memory.heapUsed)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Heap الكلي:</span>
+                    <span class="stat-value">${formatBytes(data.process.memory.heapTotal)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">نسبة Heap:</span>
+                    <span class="stat-value">${heapPct}%</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill ${getProgressClass(heapRatio)}"
+                         style="width: ${Math.min(100, Math.max(0, heapRatio * 100))}%"></div>
+                </div>
+                <div class="small muted" style="margin-top:8px;">
+                    ملاحظة: نسبة Heap تختلف عن نسبة RAM للنظام
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>🗄️ قاعدة البيانات</h2>
+                <div class="stat-item">
+                    <span class="stat-label">الحالة:</span>
+                    <span class="stat-value">
+                        <span class="badge ${data.database.connected ? 'badge-success' : 'badge-danger'}">
+                            ${data.database.connected ? 'متصل' : 'غير متصل'}
+                        </span>
+                    </span>
+                </div>
+
+                ${data.database.connected ? `
+                    <div class="stat-item">
+                        <span class="stat-label">الإصدار:</span>
+                        <span class="stat-value">${data.database.version}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">حجم القاعدة:</span>
+                        <span class="stat-value">${data.database.size || 'N/A'}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">اتصالات DB:</span>
+                        <span class="stat-value">${data.database.connections.active} نشط / ${data.database.connections.total} إجمالي</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">Pool:</span>
+                        <span class="stat-value">${data.database.pool.totalCount} total | ${data.database.pool.idleCount} idle | ${data.database.pool.waitingCount} wait</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">الحد الأقصى (Max):</span>
+                        <span class="stat-value">${data.database.pool.max}</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">الاستعلامات:</span>
+                        <span class="stat-value">${data.database.queries.total} (بطيئة: ${data.database.queries.slow}, أخطاء: ${data.database.queries.errors})</span>
+                    </div>
+                ` : `
+                    <div class="stat-item">
+                        <span class="stat-label">الخطأ:</span>
+                        <span class="stat-value dangerText wrap">${escapeHtml(data.database.error || 'N/A')}</span>
+                    </div>
+                `}
+            </div>
+
+            <div class="card">
+                <h2>📊 الطلبات</h2>
+                <div class="stat-item">
+                    <span class="stat-label">إجمالي الطلبات:</span>
+                    <span class="stat-value">${data.requests.total}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">مدة التشغيل:</span>
+                    <span class="stat-value">${formatUptime(data.requests.uptime / 1000)}</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">الأخطاء:</span>
+                    <span class="stat-value">
+                        <span class="badge ${data.requests.errors.length > 0 ? 'badge-danger' : 'badge-success'}">
+                            ${data.requests.errors.length}
+                        </span>
+                    </span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">طلبات بطيئة:</span>
+                    <span class="stat-value">
+                        <span class="badge ${data.requests.slowRequests.length > 0 ? 'badge-warning' : 'badge-success'}">
+                            ${data.requests.slowRequests.length}
+                        </span>
+                    </span>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>📤 حسب النوع (Method)</h2>
+                ${Object.entries(data.requests.byMethod || {}).map(([method, count]) => `
+                    <div class="stat-item">
+                        <span class="stat-label">${arMethod(method)}:</span>
+                        <span class="stat-value">${count}</span>
+                    </div>
+                `).join('') || '<div class="muted">لا توجد بيانات</div>'}
+            </div>
+
+            <div class="card">
+                <h2>📈 حسب الحالة (Status)</h2>
+                ${Object.entries(data.requests.byStatus || {}).map(([status, count]) => `
+                    <div class="stat-item">
+                        <span class="stat-label">${arStatus(status)}:</span>
+                        <span class="stat-value">${count}</span>
+                    </div>
+                `).join('') || '<div class="muted">لا توجد بيانات</div>'}
+            </div>
+
+            <div class="card">
+                <h2>🔗 أشهر المسارات</h2>
+                ${Object.entries(data.requests.byPath || {}).slice(0, 10).map(([p, count]) => `
+                    <div class="stat-item">
+                        <span class="stat-label small">${escapeHtml(p)}:</span>
+                        <span class="stat-value">${count}</span>
+                    </div>
+                `).join('') || '<div class="muted">لا توجد بيانات</div>'}
+            </div>
+
+            <div class="card full-width">
+                <h2>📝 السجلات</h2>
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>الملف</th>
+                            <th>الحجم</th>
+                            <th>عدد الأسطر</th>
+                            <th>آخر تعديل</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${Object.entries(data.logs || {}).map(([name, info]) => `
+                            <tr>
+                                <td>${escapeHtml(arLogName(name))}.log</td>
+                                <td>${info && info.exists ? info.sizeFormatted : 'غير موجود'}</td>
+                                <td>${info && info.exists ? (info.lineCount ?? '-') : '-'}</td>
+                                <td>${info && info.exists ? new Date(info.modified).toLocaleString('ar-SA') : '-'}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function updateRefreshInfo() {
+        const now = new Date();
+        const mode = autoRefreshEnabled ? `تلقائي (كل ${Math.round(ECO_REFRESH_MS/1000)} ثانية)` : 'متوقف (Eco)';
+        document.getElementById('refreshInfo').textContent =
+            `آخر تحديث: ${now.toLocaleString('ar-SA')} — وضع التحديث: ${mode}`;
+    }
+
+    function refreshData() {
+        loadData();
+    }
+
+    async function resetAllStats() {
+        if (!confirm('هل أنت متأكد من إعادة تعيين جميع الإحصائيات؟')) return;
+
+        const wasEnabled = autoRefreshEnabled;
+        autoRefreshEnabled = false;
+        updateAutoBtnText();
+
+        try {
+            const response = await fetchWithTimeout(apiUrl('reset'), { method: 'POST' }, 8000);
+            const result = await response.json();
+
+            if (result.success) {
+                alert('تم إعادة تعيين الإحصائيات بنجاح');
+                await loadData();
+            } else {
+                alert('خطأ في إعادة تعيين الإحصائيات');
+            }
+        } catch (error) {
+            console.error('Error resetting stats:', error);
+            alert((error && error.name === 'AbortError') ? 'انتهت مهلة الاتصال' : 'خطأ في الاتصال بالخادم');
+        } finally {
+            autoRefreshEnabled = wasEnabled;
+            updateAutoBtnText();
         }
+    }
 
-        function formatUptime(seconds) {
-            const days = Math.floor(seconds / 86400);
-            const hours = Math.floor((seconds % 86400) / 3600);
-            const minutes = Math.floor((seconds % 3600) / 60);
-            const secs = Math.floor(seconds % 60);
+    function formatBytes(bytes) {
+        if (!bytes) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    }
 
-            if (days > 0) return \`\${days} يوم \${hours} ساعة \${minutes} دقيقة\`;
-            if (hours > 0) return \`\${hours} ساعة \${minutes} دقيقة \${secs} ثانية\`;
-            if (minutes > 0) return \`\${minutes} دقيقة \${secs} ثانية\`;
-            return \`\${secs} ثانية\`;
-        }
+    function formatUptime(seconds) {
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
 
-        function getProgressClass(ratio) {
-            if (ratio > 0.8) return 'danger';
-            if (ratio > 0.6) return 'warning';
-            return '';
-        }
+        if (days > 0) return `${days} يوم ${hours} ساعة ${minutes} دقيقة`;
+        if (hours > 0) return `${hours} ساعة ${minutes} دقيقة ${secs} ثانية`;
+        if (minutes > 0) return `${minutes} دقيقة ${secs} ثانية`;
+        return `${secs} ثانية`;
+    }
 
-        function safeDivide(a, b) {
-            const x = Number(a || 0);
-            const y = Number(b || 0);
-            if (!y) return 0;
-            return x / y;
-        }
+    function getProgressClass(ratio) {
+        if (ratio > 0.8) return 'danger';
+        if (ratio > 0.6) return 'warning';
+        return '';
+    }
 
-        function escapeHtml(str) {
-            if (str === null || str === undefined) return '';
-            return String(str)
-              .replaceAll('&', '&amp;')
-              .replaceAll('<', '&lt;')
-              .replaceAll('>', '&gt;')
-              .replaceAll('"', '&quot;')
-              .replaceAll("'", '&#039;');
-        }
-    </script>
+    function safeDivide(a, b) {
+        const x = Number(a || 0);
+        const y = Number(b || 0);
+        if (!y) return 0;
+        return x / y;
+    }
+
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+          .replaceAll("'", '&#039;');
+    }
+</script>
+
 </body>
 </html>
   `;
 }
 
 module.exports = router;
+
