@@ -71,17 +71,24 @@ async function sendTransactionNotification(transaction, customer, owner) {
 
     // جلب FCM tokens للعميل (customer)
     // البحث عن المستخدم الذي له نفس رقم الهاتف مثل العميل
+    // ✅ استخدام phone_number من app_users (ليس phone)
     const customerTokens = await pool.query(
       `SELECT uft.token, uft.is_primary, uft.firebase_uid
        FROM user_fcm_tokens uft
        JOIN app_users au ON uft.firebase_uid = au.firebase_uid
-       WHERE au.phone = $1 
+       WHERE au.phone_number = $1 
          AND uft.is_active = TRUE
          AND au.deleted_at IS NULL
        ORDER BY uft.is_primary DESC, uft.last_used_at DESC
        LIMIT 10`,
       [customer.phone_number]
     );
+    
+    logger.info(`Searching FCM tokens for customer`, {
+      customerId: customer.client_id,
+      phoneNumber: customer.phone_number,
+      tokensFound: customerTokens.rows.length
+    });
 
     if (customerTokens.rows.length === 0) {
       logger.warning(`No FCM tokens found for customer`, {
@@ -92,10 +99,15 @@ async function sendTransactionNotification(transaction, customer, owner) {
     }
 
     // بناء محتوى الإشعار
-    const directionText = transaction.transaction_direction === 'DEBIT' ? 'مدين' : 'دائن';
+    // ✅ قاعدة البيانات تحفظ income/expense، لكن نحتاج DEBIT/CREDIT للإشعار
+    const direction = transaction.transaction_direction;
+    const isDebit = direction === 'expense' || direction === 'DEBIT';
+    const directionText = isDebit ? 'مدين' : 'دائن';
+    const directionCode = isDebit ? 'DEBIT' : 'CREDIT';
+    
     const amount = parseFloat(transaction.transaction_amount);
     const currency = transaction.currency_code || 'IQD';
-    const ownerName = owner?.name || 'مستخدم';
+    const ownerName = owner?.full_name || owner?.name || 'مستخدم';
     const customerName = customer?.client_name || 'عميل';
     
     const notificationTitle = `قيد جديد من ${ownerName}`;
@@ -110,7 +122,7 @@ async function sendTransactionNotification(transaction, customer, owner) {
         type: 'transaction',
         transactionUuid: transaction.transaction_uuid || '',
         transactionId: transaction.transaction_id?.toString() || '',
-        direction: transaction.transaction_direction || '',
+        direction: directionCode,
         amount: amount.toString(),
         currency: currency,
         customerId: transaction.client_id?.toString() || '',
