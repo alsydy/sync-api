@@ -62,6 +62,81 @@ pool.on('error', (err) => {
   });
 });
 
+// Wrapper لتسجيل استعلامات قاعدة البيانات (للمراقبة)
+// ملاحظة: يتم تحميل monitoringService بشكل lazy لتجنب circular dependencies
+let monitoringServiceLoaded = false;
+let recordQuery = null;
+
+function loadMonitoringService() {
+  if (!monitoringServiceLoaded) {
+    try {
+      const monitoring = require('../services/monitoringService');
+      recordQuery = monitoring.recordQuery;
+      monitoringServiceLoaded = true;
+    } catch (error) {
+      // تجاهل الأخطاء في تحميل خدمة المراقبة
+    }
+  }
+}
+
+const originalQuery = pool.query.bind(pool);
+pool.query = function(text, params, callback) {
+  const startTime = Date.now();
+  const queryText = typeof text === 'string' ? text : (text?.text || text?.command || 'N/A');
+  
+  // تحميل خدمة المراقبة
+  loadMonitoringService();
+  
+  // استدعاء الاستعلام الأصلي
+  const result = originalQuery(text, params, (err, res) => {
+    const duration = Date.now() - startTime;
+    
+    // تسجيل الاستعلام للمراقبة
+    if (recordQuery) {
+      try {
+        recordQuery(duration, queryText, err);
+      } catch (error) {
+        // تجاهل الأخطاء في تسجيل المراقبة
+      }
+    }
+    
+    // استدعاء callback الأصلي
+    if (callback) {
+      callback(err, res);
+    }
+  });
+  
+  // إذا كان Promise
+  if (result && typeof result.then === 'function') {
+    return result.then(
+      (res) => {
+        const duration = Date.now() - startTime;
+        if (recordQuery) {
+          try {
+            recordQuery(duration, queryText, null);
+          } catch (error) {
+            // تجاهل الأخطاء في تسجيل المراقبة
+          }
+        }
+        return res;
+      },
+      (err) => {
+        const duration = Date.now() - startTime;
+        if (recordQuery) {
+          try {
+            recordQuery(duration, queryText, err);
+          } catch (error) {
+            // تجاهل الأخطاء في تسجيل المراقبة
+          }
+        }
+        throw err;
+      }
+    );
+  }
+  
+  return result;
+};
+
 // دالة للتحقق من صحة الـ Pool
 async function checkPoolHealth() {
   try {
