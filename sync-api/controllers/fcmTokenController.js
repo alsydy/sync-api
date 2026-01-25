@@ -1,12 +1,25 @@
 // ============================================================================
 // FCM Token Controller
 // ============================================================================
-// Controller لـ FCM Tokens
-// ============================================================================
 
 const { pool } = require('../config/database');
 const { secondsToMs } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const { verifyToken } = require('../middleware/auth');
+
+/**
+ * استخراج firebaseUid من Authorization header (احتياط)
+ */
+function extractFirebaseUidFromAuthHeader(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
+
+  const token = authHeader.substring(7).trim();
+  const decoded = verifyToken(token);
+  if (!decoded || !decoded.firebaseUid) return null;
+
+  return decoded.firebaseUid;
+}
 
 /**
  * POST /api/fcm-tokens
@@ -24,30 +37,64 @@ async function registerFcmToken(req, res, next) {
       appVersionCode
     } = req.body;
 
-    logger.info(`Receiving FCM token registration request: firebaseUid=${firebaseUid}, token=${token?.substring(0, 20)}...`);
+    const hasAuthHeader = !!req.headers.authorization;
+    logger.info(
+      `Receiving FCM token registration request: firebaseUid=${firebaseUid || 'null'}, token=${token?.substring(0, 20)}..., authHeader=${hasAuthHeader}`
+    );
 
     // Input Validation
     if (!token) {
       logger.warning('Validation failed: token is required');
       return res.status(400).json({ success: false, error: 'token مطلوب' });
     }
-    
+
     if (typeof token !== 'string' || token.trim().length === 0) {
       logger.warning('Validation failed: token is invalid');
       return res.status(400).json({ success: false, error: 'token غير صحيح' });
     }
 
-    // Security: إذا كان المستخدم مصادقاً، استخدم firebaseUid من token
-    let finalFirebaseUid = firebaseUid;
+    // 1) الأفضل: firebaseUid من req.user (لو token verified)
+    let finalFirebaseUid = null;
+
     if (req.user && req.user.firebaseUid) {
       finalFirebaseUid = req.user.firebaseUid;
-      // Security: التحقق من أن المستخدم لا يسجل token لمستخدم آخر
+
+      // Security: منع تسجيل token لمستخدم آخر
       if (firebaseUid && firebaseUid !== req.user.firebaseUid) {
         logger.warning(`Security: User ${req.user.firebaseUid} attempted to register token for ${firebaseUid}`);
-        return res.status(403).json({ 
-          success: false, 
-          error: 'ليس لديك صلاحية لتسجيل token لمستخدم آخر' 
+        return res.status(403).json({
+          success: false,
+          error: 'ليس لديك صلاحية لتسجيل token لمستخدم آخر'
         });
+      }
+    } else {
+      // 2) احتياط: حاول استخراجها مباشرة من Authorization
+      const headerUid = extractFirebaseUidFromAuthHeader(req);
+      if (headerUid) {
+        finalFirebaseUid = headerUid;
+
+        // لو أرسل firebaseUid مختلف في body نمنع
+        if (firebaseUid && firebaseUid !== headerUid) {
+          logger.warning(`Security: headerUid=${headerUid} but body firebaseUid=${firebaseUid}`);
+          return res.status(403).json({
+            success: false,
+            error: 'ليس لديك صلاحية لتسجيل token لمستخدم آخر'
+          });
+        }
+      } else {
+        // 3) كآخر حل: body firebaseUid (لو موثق عندك بطريقة ثانية)
+        finalFirebaseUid = firebaseUid || null;
+
+        // إذا كان فيه Authorization لكن ما قدرنا نفكه -> هذا غالباً JWT_SECRET مختلف
+        if (!finalFirebaseUid && hasAuthHeader) {
+          logger.warning(
+            'Auth header present but token verify failed. Check JWT_SECRET on the server (Render) matches the one used to sign tokens.'
+          );
+          return res.status(401).json({
+            success: false,
+            error: 'Token غير صالح (تحقق من JWT_SECRET على الخادم)'
+          });
+        }
       }
     }
 
@@ -76,8 +123,8 @@ async function registerFcmToken(req, res, next) {
     );
 
     if (existingTokenResult.rows.length > 0) {
-      // تحديث token موجود
       const existingToken = existingTokenResult.rows[0];
+
       await pool.query(
         `UPDATE user_fcm_tokens 
          SET is_active = TRUE, 
@@ -117,9 +164,8 @@ async function registerFcmToken(req, res, next) {
       [userId]
     );
 
-    // إدراج token جديد
     const appVersionCodeInt = appVersionCode ? parseInt(appVersionCode, 10) : null;
-    
+
     const result = await pool.query(
       `INSERT INTO user_fcm_tokens (
         user_id, firebase_uid, token, device_model, device_brand, 
@@ -142,7 +188,7 @@ async function registerFcmToken(req, res, next) {
     );
 
     const newToken = result.rows[0];
-    
+
     logger.info(`FCM token registered successfully`, {
       user_id: userId,
       firebase_uid: finalFirebaseUid,
@@ -163,34 +209,35 @@ async function registerFcmToken(req, res, next) {
     });
   } catch (error) {
     logger.error('Error registering FCM token', error);
-    if (error.code === '23505') { // Unique constraint violation
+
+    if (error.code === '23505') {
       logger.warning('Token already registered (unique constraint)');
       return res.status(409).json({ success: false, error: 'هذا الـ token مسجل بالفعل' });
     }
-    if (error.code === '42P01') { // Table does not exist
+
+    if (error.code === '42P01') {
       logger.error('Table user_fcm_tokens does not exist! Migration script must be run');
-      return res.status(500).json({ 
-        success: false, 
-        error: 'الجدول غير موجود. يرجى تشغيل migration script أولاً' 
+      return res.status(500).json({
+        success: false,
+        error: 'الجدول غير موجود. يرجى تشغيل migration script أولاً'
       });
     }
+
     next(error);
   }
 }
 
 /**
  * GET /api/fcm-tokens/:firebaseUid
- * جلب جميع FCM tokens النشطة للمستخدم
  */
 async function getFcmTokens(req, res, next) {
   try {
     const { firebaseUid } = req.params;
 
-    // Security: إذا كان المستخدم مصادقاً، تحقق من أنه يطلب tokens لنفسه
     if (req.user && req.user.firebaseUid && req.user.firebaseUid !== firebaseUid) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'ليس لديك صلاحية لعرض tokens لمستخدم آخر' 
+      return res.status(403).json({
+        success: false,
+        error: 'ليس لديك صلاحية لعرض tokens لمستخدم آخر'
       });
     }
 
@@ -228,13 +275,11 @@ async function getFcmTokens(req, res, next) {
 
 /**
  * DELETE /api/fcm-tokens/:tokenId
- * حذف/تعطيل FCM token
  */
 async function deleteFcmToken(req, res, next) {
   try {
     const { tokenId } = req.params;
 
-    // Security: التحقق من أن المستخدم يملك هذا الـ token
     const tokenResult = await pool.query(
       'SELECT user_id, firebase_uid FROM user_fcm_tokens WHERE token_id = $1',
       [tokenId]
@@ -247,13 +292,12 @@ async function deleteFcmToken(req, res, next) {
     const token = tokenResult.rows[0];
 
     if (req.user && req.user.firebaseUid && req.user.firebaseUid !== token.firebase_uid) {
-      return res.status(403).json({ 
-        success: false, 
-        error: 'ليس لديك صلاحية لحذف token لمستخدم آخر' 
+      return res.status(403).json({
+        success: false,
+        error: 'ليس لديك صلاحية لحذف token لمستخدم آخر'
       });
     }
 
-    // تعطيل الـ token (soft delete)
     await pool.query(
       'UPDATE user_fcm_tokens SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE token_id = $1',
       [tokenId]
@@ -272,4 +316,3 @@ module.exports = {
   getFcmTokens,
   deleteFcmToken
 };
-
