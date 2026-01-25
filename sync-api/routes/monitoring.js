@@ -297,10 +297,28 @@ function getMonitoringHTML() {
             document.getElementById('autoBtn').textContent = autoRefreshEnabled ? '⏸️ إيقاف التحديث' : '▶️ تشغيل التحديث';
         }
 
+        // ✅ إصلاح المسارات: يعمل سواء كان الرابط /api/monitoring أو /api/monitoring/
+        function apiUrl(subPath) {
+            let base = window.location.pathname || '/';
+            if (!base.endsWith('/')) base += '/';
+            return base + String(subPath || '').replace(/^\\/+/, '');
+        }
+
+        // ✅ Timeout للـ fetch حتى لا يعلق "جاري التحميل"
+        async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const res = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store' });
+                return res;
+            } finally {
+                clearTimeout(id);
+            }
+        }
+
         async function loadData() {
             try {
-                // مسار نسبي عشان يشتغل تحت أي prefix
-                const response = await fetch('./stats', { cache: 'no-store' });
+                const response = await fetchWithTimeout(apiUrl('stats'), {}, 8000);
                 const result = await response.json();
 
                 if (result.success) {
@@ -315,8 +333,8 @@ function getMonitoringHTML() {
             } catch (error) {
                 console.error('Error loading data:', error);
                 document.getElementById('statsContainer').innerHTML =
-                    '<div class="card full-width"><p class="dangerText">خطأ في الاتصال بالخادم</p></div>';
-                setStatus('bad', 'لا يمكن الاتصال بالخادم');
+                    '<div class="card full-width"><p class="dangerText">تعذر تحميل البيانات. جرّب تحديث الصفحة.</p></div>';
+                setStatus('bad', (error && error.name === 'AbortError') ? 'انتهت مهلة التحميل' : 'لا يمكن الاتصال بالخادم');
             }
         }
 
@@ -603,7 +621,7 @@ function getMonitoringHTML() {
             autoRefreshEnabled = false;
 
             try {
-                const response = await fetch('./reset', { method: 'POST' });
+                const response = await fetchWithTimeout(apiUrl('reset'), { method: 'POST' }, 8000);
                 const result = await response.json();
 
                 if (result.success) {
@@ -614,7 +632,7 @@ function getMonitoringHTML() {
                 }
             } catch (error) {
                 console.error('Error resetting stats:', error);
-                alert('خطأ في الاتصال بالخادم');
+                alert((error && error.name === 'AbortError') ? 'انتهت مهلة الاتصال' : 'خطأ في الاتصال بالخادم');
             } finally {
                 autoRefreshEnabled = wasEnabled;
             }
