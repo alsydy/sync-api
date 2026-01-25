@@ -1,8 +1,6 @@
 // ============================================================================
 // Authentication & Authorization Middleware
 // ============================================================================
-// نظام مصادقة وتحقق متقدم للأمان
-// ============================================================================
 
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
@@ -10,31 +8,35 @@ const rateLimit = require('express-rate-limit');
 // JWT Secret (يجب أن يكون في .env)
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 
+// تحذير مهم إذا تعمل على production وما زلت تستخدم default secret
+if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'your-secret-key-change-in-production') {
+  // لا نوقف السيرفر، لكن نطبع تحذير واضح
+  // لأن هذا يسبب فشل verifyToken إذا كانت التوكنات صادرة من بيئة Secret مختلف
+  console.warn('⚠️ WARNING: JWT_SECRET is using the default value in production. Set JWT_SECRET in environment variables!');
+}
+
 // ============================================================================
 // Rate Limiting
 // ============================================================================
 
-// Rate limiter عام
 const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 دقيقة
-  max: 100, // 100 طلب لكل IP
+  windowMs: 15 * 60 * 1000,
+  max: 100,
   message: 'تم تجاوز الحد المسموح من الطلبات. يرجى المحاولة لاحقاً.',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Rate limiter للمصادقة
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 دقيقة
-  max: 5, // 5 محاولات فقط
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   message: 'تم تجاوز عدد محاولات تسجيل الدخول. يرجى المحاولة لاحقاً.',
   skipSuccessfulRequests: true,
 });
 
-// Rate limiter للمزامنة
 const syncLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 دقيقة
-  max: 10, // 10 طلبات مزامنة في الدقيقة
+  windowMs: 60 * 1000,
+  max: 10,
   message: 'تم تجاوز حد طلبات المزامنة. يرجى الانتظار قليلاً.',
 });
 
@@ -42,9 +44,6 @@ const syncLimiter = rateLimit({
 // JWT Token Functions
 // ============================================================================
 
-/**
- * إنشاء JWT token
- */
 function generateToken(userId, firebaseUid) {
   return jwt.sign(
     { userId, firebaseUid, type: 'access' },
@@ -53,9 +52,6 @@ function generateToken(userId, firebaseUid) {
   );
 }
 
-/**
- * التحقق من JWT token
- */
 function verifyToken(token) {
   try {
     return jwt.verify(token, JWT_SECRET);
@@ -68,37 +64,32 @@ function verifyToken(token) {
 // Authentication Middleware
 // ============================================================================
 
-/**
- * Middleware للتحقق من المصادقة
- */
 async function authenticate(req, res, next) {
   try {
-    // الحصول على token من Header
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
         success: false,
         error: 'مطلوب token للمصادقة'
       });
     }
-    
-    const token = authHeader.substring(7);
+
+    const token = authHeader.substring(7).trim();
     const decoded = verifyToken(token);
-    
+
     if (!decoded) {
       return res.status(401).json({
         success: false,
         error: 'Token غير صالح أو منتهي الصلاحية'
       });
     }
-    
-    // إضافة معلومات المستخدم للطلب
+
     req.user = {
       userId: decoded.userId,
       firebaseUid: decoded.firebaseUid
     };
-    
+
     next();
   } catch (error) {
     return res.status(401).json({
@@ -110,26 +101,30 @@ async function authenticate(req, res, next) {
 
 /**
  * Middleware اختياري للمصادقة (للعمليات العامة)
+ * ✅ تم تحسينه: إذا فشل verify نضيف ملاحظة داخل req (للتشخيص) بدون ما نمنع الطلب
  */
 async function optionalAuthenticate(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
-    
+
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.substring(7);
+      const token = authHeader.substring(7).trim();
       const decoded = verifyToken(token);
-      
+
       if (decoded) {
         req.user = {
           userId: decoded.userId,
           firebaseUid: decoded.firebaseUid
         };
+      } else {
+        // ملاحظة تشخيصية فقط
+        req.authWarning = 'Bearer token موجود لكن verifyToken فشل (تحقق من JWT_SECRET أو token)';
       }
     }
-    
+
     next();
   } catch (error) {
-    // في حالة الخطأ، نستمر بدون مصادقة
+    req.authWarning = 'خطأ أثناء optionalAuthenticate';
     next();
   }
 }
@@ -138,9 +133,6 @@ async function optionalAuthenticate(req, res, next) {
 // Authorization Middleware
 // ============================================================================
 
-/**
- * التحقق من أن المستخدم يملك الصلاحية للوصول للمورد
- */
 async function authorizeResource(req, res, next) {
   try {
     if (!req.user) {
@@ -149,8 +141,7 @@ async function authorizeResource(req, res, next) {
         error: 'مطلوب مصادقة للوصول لهذا المورد'
       });
     }
-    
-    // يمكن إضافة منطق إضافي للتحقق من الصلاحيات هنا
+
     next();
   } catch (error) {
     return res.status(403).json({
@@ -164,11 +155,7 @@ async function authorizeResource(req, res, next) {
 // Input Validation
 // ============================================================================
 
-/**
- * التحقق من صحة البيانات المدخلة
- */
 function validateInput(req, res, next) {
-  // يمكن إضافة منطق التحقق هنا
   next();
 }
 
@@ -187,4 +174,3 @@ module.exports = {
   authLimiter,
   syncLimiter
 };
-
