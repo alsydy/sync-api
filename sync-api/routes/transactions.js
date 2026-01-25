@@ -7,7 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const transactionController = require('../controllers/transactionController');
-const { optionalAuthenticate, syncLimiter } = require('../middleware/auth');
+const { optionalAuthenticate, authenticate, syncLimiter } = require('../middleware/auth');
 
 /**
  * GET /api/transactions
@@ -25,8 +25,9 @@ router.get('/by-uuid/:transactionUuid', optionalAuthenticate, transactionControl
  * GET /api/transactions/debt-summary
  * الحصول على إحصائيات الديون (creditor summaries)
  * ✅ يجب أن يأتي قبل /:transactionId لأن Express يطابق routes بالترتيب
+ * 🔒 يتطلب مصادقة إلزامية - يستخدم req.user فقط للأمان
  */
-router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
+router.get('/debt-summary', authenticate, transactionController.getDebtSummary);
 
 /**
  * GET /api/transactions/:transactionId
