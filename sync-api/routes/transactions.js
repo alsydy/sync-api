@@ -22,8 +22,16 @@ router.get('/', optionalAuthenticate, transactionController.getTransactions);
 router.get('/by-uuid/:transactionUuid', optionalAuthenticate, transactionController.getTransactionByUuid);
 
 /**
+ * GET /api/transactions/debt-summary
+ * الحصول على إحصائيات الديون (creditor summaries)
+ * ✅ يجب أن يأتي قبل /:transactionId لأن Express يطابق routes بالترتيب
+ */
+router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
+
+/**
  * GET /api/transactions/:transactionId
  * الحصول على معاملة محددة
+ * ⚠️ يجب أن يأتي بعد جميع routes المحددة (مثل /debt-summary)
  */
 router.get('/:transactionId', optionalAuthenticate, transactionController.getTransactionById);
 
@@ -50,12 +58,6 @@ router.delete('/by-uuid/:transactionUuid', optionalAuthenticate, transactionCont
  * حذف معاملة (Soft Delete)
  */
 router.delete('/:transactionId', optionalAuthenticate, transactionController.deleteTransactionById);
-
-/**
- * GET /api/transactions/debt-summary
- * الحصول على إحصائيات الديون (creditor summaries)
- */
-router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
 
 module.exports = router;
 
