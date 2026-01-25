@@ -13,20 +13,27 @@ const logger = require('../utils/logger');
 const validate = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
+    const errorDetails = errors.array().map(err => ({
+      field: err.path || err.param,
+      message: err.msg,
+      value: err.value
+    }));
+    
     logger.warn('Validation failed', {
-      errors: errors.array(),
+      errors: errorDetails,
       path: req.path,
-      method: req.method
+      method: req.method,
+      body: req.body
     });
+    
+    // ✅ إرجاع رسالة خطأ أكثر وضوحاً
+    const firstError = errorDetails[0];
+    const errorMessage = firstError ? firstError.message : 'خطأ في التحقق من البيانات';
     
     return res.status(400).json({
       success: false,
-      error: 'خطأ في التحقق من البيانات',
-      errors: errors.array().map(err => ({
-        field: err.path || err.param,
-        message: err.msg,
-        value: err.value
-      }))
+      error: errorMessage,
+      errors: errorDetails
     });
   }
   next();
@@ -42,7 +49,9 @@ const validate = (req, res, next) => {
 const validateLogin = [
   body('phone')
     .notEmpty().withMessage('رقم الهاتف مطلوب')
-    .isMobilePhone('ar-IQ').withMessage('رقم الهاتف غير صحيح'),
+    .trim()
+    .isString().withMessage('رقم الهاتف يجب أن يكون نص')
+    .matches(/^[0-9]{7,15}$/).withMessage('رقم الهاتف يجب أن يكون أرقام فقط (7-15 رقم)'),
   body('password')
     .notEmpty().withMessage('كلمة المرور مطلوبة')
     .isLength({ min: 6 }).withMessage('كلمة المرور يجب أن تكون 6 أحرف على الأقل'),
