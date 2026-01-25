@@ -354,25 +354,50 @@ async function syncTransaction(req, res, next) {
       
       // ✅ إرسال إشعار FCM إذا كان notify_customer = true
       if (transaction.notify_customer) {
-        try {
-          // جلب بيانات العميل والمالك في الخلفية
-          const [customerResult, ownerResult] = await Promise.all([
-            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
-            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
-          ]);
-          
-          const customer = customerResult.rows[0];
-          const owner = ownerResult.rows[0];
-          
-          if (customer && owner && customer.phone_number) {
-            // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
-            sendTransactionNotification(transaction, customer, owner)
-              .catch(err => logger.error('Background notification failed', err));
+        // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
+        setImmediate(async () => {
+          try {
+            // جلب بيانات العميل والمالك
+            const [customerResult, ownerResult] = await Promise.all([
+              pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
+              pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
+            ]);
+            
+            const customer = customerResult.rows[0];
+            const owner = ownerResult.rows[0];
+            
+            if (customer && owner && customer.phone_number) {
+              logger.info('Sending transaction notification', {
+                transactionUuid: transaction.transaction_uuid,
+                customerId: customer.client_id,
+                customerPhone: customer.phone_number,
+                ownerId: owner.user_id
+              });
+              
+              const result = await sendTransactionNotification(transaction, customer, owner);
+              if (!result.success) {
+                logger.warning('Transaction notification failed', {
+                  transactionUuid: transaction.transaction_uuid,
+                  reason: result.reason || result.error
+                });
+              }
+            } else {
+              logger.warning('Cannot send notification: missing data', {
+                transactionUuid: transaction.transaction_uuid,
+                hasCustomer: !!customer,
+                hasOwner: !!owner,
+                hasPhone: !!(customer?.phone_number)
+              });
+            }
+          } catch (notifError) {
+            // لا نوقف العملية إذا فشل الإشعار
+            logger.error('Error sending transaction notification', {
+              error: notifError.message,
+              stack: notifError.stack,
+              transactionUuid: transaction.transaction_uuid
+            });
           }
-        } catch (notifError) {
-          // لا نوقف العملية إذا فشل الإشعار
-          logger.error('Error preparing transaction notification', notifError);
-        }
+        });
       }
       
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
@@ -498,25 +523,50 @@ async function syncTransaction(req, res, next) {
       
       // ✅ إرسال إشعار FCM إذا كان notify_customer = true
       if (transaction.notify_customer) {
-        try {
-          // جلب بيانات العميل والمالك في الخلفية
-          const [customerResult, ownerResult] = await Promise.all([
-            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
-            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
-          ]);
-          
-          const customer = customerResult.rows[0];
-          const owner = ownerResult.rows[0];
-          
-          if (customer && owner && customer.phone_number) {
-            // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
-            sendTransactionNotification(transaction, customer, owner)
-              .catch(err => logger.error('Background notification failed', err));
+        // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
+        setImmediate(async () => {
+          try {
+            // جلب بيانات العميل والمالك
+            const [customerResult, ownerResult] = await Promise.all([
+              pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
+              pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
+            ]);
+            
+            const customer = customerResult.rows[0];
+            const owner = ownerResult.rows[0];
+            
+            if (customer && owner && customer.phone_number) {
+              logger.info('Sending transaction notification', {
+                transactionUuid: transaction.transaction_uuid,
+                customerId: customer.client_id,
+                customerPhone: customer.phone_number,
+                ownerId: owner.user_id
+              });
+              
+              const result = await sendTransactionNotification(transaction, customer, owner);
+              if (!result.success) {
+                logger.warning('Transaction notification failed', {
+                  transactionUuid: transaction.transaction_uuid,
+                  reason: result.reason || result.error
+                });
+              }
+            } else {
+              logger.warning('Cannot send notification: missing data', {
+                transactionUuid: transaction.transaction_uuid,
+                hasCustomer: !!customer,
+                hasOwner: !!owner,
+                hasPhone: !!(customer?.phone_number)
+              });
+            }
+          } catch (notifError) {
+            // لا نوقف العملية إذا فشل الإشعار
+            logger.error('Error sending transaction notification', {
+              error: notifError.message,
+              stack: notifError.stack,
+              transactionUuid: transaction.transaction_uuid
+            });
           }
-        } catch (notifError) {
-          // لا نوقف العملية إذا فشل الإشعار
-          logger.error('Error preparing transaction notification', notifError);
-        }
+        });
       }
       
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
