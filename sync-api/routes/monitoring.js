@@ -275,6 +275,54 @@ function getMonitoringHTML() {
         let autoRefreshEnabled = true;
         let lastData = null;
 
+        // =========================
+        // ✅ قاموس ترجمة للعرض
+        // =========================
+        const AR_MAP = {
+            platform: {
+                linux: 'لينكس',
+                win32: 'ويندوز',
+                darwin: 'ماك'
+            },
+            arch: {
+                x64: '64-بت',
+                arm64: 'ARM 64-بت',
+                arm: 'ARM'
+            },
+            method: {
+                GET: 'جلب',
+                POST: 'إرسال',
+                PUT: 'تحديث',
+                DELETE: 'حذف',
+                PATCH: 'تعديل',
+                HEAD: 'رأس',
+                OPTIONS: 'خيارات'
+            },
+            status: {
+                '2xx': 'نجاح',
+                '3xx': 'إعادة توجيه',
+                '4xx': 'خطأ عميل',
+                '5xx': 'خطأ خادم'
+            },
+            logs: {
+                error: 'أخطاء',
+                combined: 'مشترك',
+                exceptions: 'استثناءات',
+                rejections: 'رفض الوعود'
+            }
+        };
+
+        function arValue(group, key) {
+            const v = AR_MAP[group] && AR_MAP[group][key];
+            return v ? \`\${v} (\${key})\` : key;
+        }
+
+        function arPlatform(p) { return arValue('platform', String(p || '')); }
+        function arArch(a) { return arValue('arch', String(a || '')); }
+        function arMethod(m) { return arValue('method', String(m || '').toUpperCase()); }
+        function arStatus(s) { return arValue('status', String(s || '')); }
+        function arLogName(n) { return arValue('logs', String(n || '')); }
+
         window.addEventListener('DOMContentLoaded', () => {
             loadData();
             startAutoRefresh();
@@ -379,22 +427,22 @@ function getMonitoringHTML() {
                     <h2>💻 معلومات النظام</h2>
                     <div class="stat-item">
                         <span class="stat-label">النظام:</span>
-                        <span class="stat-value">\${data.system.platform} (\${data.system.arch})</span>
+                        <span class="stat-value">\${arPlatform(data.system.platform)} — \${arArch(data.system.arch)}</span>
                     </div>
                     <div class="stat-item">
                         <span class="stat-label">Node.js:</span>
                         <span class="stat-value">\${data.system.nodeVersion}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Uptime:</span>
+                        <span class="stat-label">مدة التشغيل (Uptime):</span>
                         <span class="stat-value">\${formatUptime(data.system.uptime)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">CPU:</span>
+                        <span class="stat-label">المعالج (CPU):</span>
                         <span class="stat-value">\${data.system.cpu.cores} نواة</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Load Avg:</span>
+                        <span class="stat-label">متوسط الضغط (Load Avg):</span>
                         <span class="stat-value">\${(data.system.loadAverage || []).map(n => Number(n).toFixed(2)).join(' , ')}</span>
                     </div>
                 </div>
@@ -403,7 +451,7 @@ function getMonitoringHTML() {
                 <div class="card">
                     <h2>🧠 الذاكرة</h2>
                     <div class="stat-item">
-                        <span class="stat-label">System RAM:</span>
+                        <span class="stat-label">ذاكرة النظام (RAM):</span>
                         <span class="stat-value">\${ramPct}%</span>
                     </div>
                     <div class="stat-item">
@@ -411,15 +459,15 @@ function getMonitoringHTML() {
                         <span class="stat-value">\${formatBytes(data.process.memory.rss)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Heap Used:</span>
+                        <span class="stat-label">Heap المستخدم:</span>
                         <span class="stat-value">\${formatBytes(data.process.memory.heapUsed)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Heap Total:</span>
+                        <span class="stat-label">Heap الكلي:</span>
                         <span class="stat-value">\${formatBytes(data.process.memory.heapTotal)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Heap %:</span>
+                        <span class="stat-label">نسبة Heap:</span>
                         <span class="stat-value">\${heapPct}%</span>
                     </div>
                     <div class="progress-bar">
@@ -427,7 +475,7 @@ function getMonitoringHTML() {
                              style="width: \${Math.min(100, Math.max(0, heapRatio * 100))}%"></div>
                     </div>
                     <div class="small muted" style="margin-top:8px;">
-                        تنبيه: Heap % يختلف عن System RAM %
+                        ملاحظة: نسبة Heap تختلف عن نسبة RAM للنظام
                     </div>
                 </div>
 
@@ -462,12 +510,12 @@ function getMonitoringHTML() {
                             <span class="stat-value">\${data.database.pool.totalCount} total | \${data.database.pool.idleCount} idle | \${data.database.pool.waitingCount} wait</span>
                         </div>
                         <div class="stat-item">
-                            <span class="stat-label">Pool Max:</span>
+                            <span class="stat-label">الحد الأقصى للاتصالات (Max):</span>
                             <span class="stat-value">\${data.database.pool.max}</span>
                         </div>
                         <div class="stat-item">
-                            <span class="stat-label">Queries:</span>
-                            <span class="stat-value">\${data.database.queries.total} (slow: \${data.database.queries.slow}, errors: \${data.database.queries.errors})</span>
+                            <span class="stat-label">الاستعلامات (Queries):</span>
+                            <span class="stat-value">\${data.database.queries.total} (بطيئة: \${data.database.queries.slow}, أخطاء: \${data.database.queries.errors})</span>
                         </div>
                         \${data.database.warning ? \`
                           <div class="warning-item">
@@ -495,11 +543,11 @@ function getMonitoringHTML() {
                         <span class="stat-value">\${data.requests.total}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Uptime:</span>
+                        <span class="stat-label">مدة التشغيل (Uptime):</span>
                         <span class="stat-value">\${formatUptime(data.requests.uptime / 1000)}</span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Errors:</span>
+                        <span class="stat-label">الأخطاء (Errors):</span>
                         <span class="stat-value">
                             <span class="badge \${data.requests.errors.length > 0 ? 'badge-danger' : 'badge-success'}">
                                 \${data.requests.errors.length}
@@ -507,7 +555,7 @@ function getMonitoringHTML() {
                         </span>
                     </div>
                     <div class="stat-item">
-                        <span class="stat-label">Slow Requests:</span>
+                        <span class="stat-label">طلبات بطيئة:</span>
                         <span class="stat-value">
                             <span class="badge \${data.requests.slowRequests.length > 0 ? 'badge-warning' : 'badge-success'}">
                                 \${data.requests.slowRequests.length}
@@ -518,10 +566,10 @@ function getMonitoringHTML() {
 
                 <!-- الطلبات حسب Method -->
                 <div class="card">
-                    <h2>📤 حسب Method</h2>
+                    <h2>📤 حسب النوع (Method)</h2>
                     \${Object.entries(data.requests.byMethod || {}).map(([method, count]) => \`
                         <div class="stat-item">
-                            <span class="stat-label">\${method}:</span>
+                            <span class="stat-label">\${arMethod(method)}:</span>
                             <span class="stat-value">\${count}</span>
                         </div>
                     \`).join('') || '<div class="muted">لا توجد بيانات</div>'}
@@ -529,10 +577,10 @@ function getMonitoringHTML() {
 
                 <!-- الطلبات حسب Status -->
                 <div class="card">
-                    <h2>📈 حسب Status</h2>
+                    <h2>📈 حسب الحالة (Status)</h2>
                     \${Object.entries(data.requests.byStatus || {}).map(([status, count]) => \`
                         <div class="stat-item">
-                            <span class="stat-label">\${status}:</span>
+                            <span class="stat-label">\${arStatus(status)}:</span>
                             <span class="stat-value">\${count}</span>
                         </div>
                     \`).join('') || '<div class="muted">لا توجد بيانات</div>'}
@@ -557,7 +605,7 @@ function getMonitoringHTML() {
                           ? data.requests.slowRequests.slice(-10).reverse().map(req => \`
                             <div class="warning-item">
                               <div class="error-time">\${new Date(req.timestamp).toLocaleString('ar-SA')}</div>
-                              <div class="warningText"><b>\${req.method}</b> \${escapeHtml(req.path)} - \${req.statusCode} (\${req.duration}ms)</div>
+                              <div class="warningText"><b>\${arMethod(req.method)}</b> \${escapeHtml(req.path)} - \${req.statusCode} (\${req.duration}ms)</div>
                             </div>\`).join('')
                           : '<p style="color:#10b981; text-align:center; padding: 20px;">لا توجد طلبات بطيئة 🎉</p>'}
                     </div>
@@ -571,7 +619,7 @@ function getMonitoringHTML() {
                           ? data.requests.errors.slice(-10).reverse().map(error => \`
                             <div class="error-item">
                                 <div class="error-time">\${new Date(error.timestamp).toLocaleString('ar-SA')}</div>
-                                <div class="error-message">\${error.method} \${escapeHtml(error.path)} - \${error.statusCode} (\${error.duration}ms)</div>
+                                <div class="error-message">\${arMethod(error.method)} \${escapeHtml(error.path)} - \${error.statusCode} (\${error.duration}ms)</div>
                             </div>\`).join('')
                           : '<p style="color:#10b981; text-align:center; padding: 20px;">لا توجد أخطاء 🎉</p>'}
                     </div>
@@ -592,7 +640,7 @@ function getMonitoringHTML() {
                         <tbody>
                             \${Object.entries(data.logs || {}).map(([name, info]) => \`
                                 <tr>
-                                    <td>\${escapeHtml(name)}.log</td>
+                                    <td>\${escapeHtml(arLogName(name))}.log</td>
                                     <td>\${info && info.exists ? info.sizeFormatted : 'غير موجود'}</td>
                                     <td>\${info && info.exists ? info.lineCount : '-'}</td>
                                     <td>\${info && info.exists ? new Date(info.modified).toLocaleString('ar-SA') : '-'}</td>
