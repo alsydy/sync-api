@@ -687,20 +687,35 @@ async function deleteTransactionById(req, res, next) {
  */
 async function getDebtSummary(req, res, next) {
   try {
-    // 🔒 الأمان: استخدام req.user فقط (من المصادقة) - تجاهل جميع query parameters
-    if (!req.user || !req.user.firebaseUid) {
-      return res.status(401).json({
+    const { currentUserPhone, currentUserId, currentUserFirebaseUid } = req.query;
+    
+    if (!currentUserFirebaseUid) {
+      return res.status(400).json({
         success: false,
-        error: 'مطلوب مصادقة صالحة'
+        error: 'currentUserFirebaseUid مطلوب'
       });
     }
     
-    const ownerFirebaseUid = req.user.firebaseUid;
+    // ✅ البحث عن جميع عملاء المستخدم الحالي (الذين يملكهم)
+    // نحتاج إلى معرفة owner_firebase_uid للمستخدم الحالي
+    let ownerFirebaseUid = currentUserFirebaseUid;
     
-    logger.debug('getDebtSummary: Authenticated request', {
-      userId: req.user.userId,
-      firebaseUid: ownerFirebaseUid
-    });
+    // إذا لم يكن currentUserFirebaseUid موجوداً، نحاول البحث عنه من currentUserPhone
+    if (!ownerFirebaseUid && currentUserPhone) {
+      const userResult = await pool.query(
+        'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL',
+        [currentUserPhone]
+      );
+      
+      if (userResult.rows.length === 0) {
+        return res.json({ success: true, data: [] });
+      }
+      
+      ownerFirebaseUid = userResult.rows[0].firebase_uid;
+      if (!ownerFirebaseUid) {
+        return res.json({ success: true, data: [] });
+      }
+    }
     
     // ✅ البحث عن جميع عملاء المستخدم الحالي
     const clientsResult = await pool.query(
