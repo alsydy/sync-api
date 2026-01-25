@@ -689,63 +689,57 @@ async function getDebtSummary(req, res, next) {
   try {
     const { currentUserPhone, currentUserId, currentUserFirebaseUid } = req.query;
     
-    if (!currentUserPhone && !currentUserFirebaseUid) {
+    if (!currentUserFirebaseUid) {
       return res.status(400).json({
         success: false,
-        error: 'currentUserPhone أو currentUserFirebaseUid مطلوب'
+        error: 'currentUserFirebaseUid مطلوب'
       });
     }
     
-    // البحث عن جميع العملاء برقم هاتف المستخدم الحالي
-    let clientsQuery = '';
-    let clientsParams = [];
+    // ✅ البحث عن جميع عملاء المستخدم الحالي (الذين يملكهم)
+    // نحتاج إلى معرفة owner_firebase_uid للمستخدم الحالي
+    let ownerFirebaseUid = currentUserFirebaseUid;
     
-    if (currentUserPhone) {
-      // ✅ إذا كان currentUserPhone موجوداً، استخدمه
-      clientsQuery = `
-        SELECT client_id, owner_user_id, owner_firebase_uid
-        FROM business_clients
-        WHERE phone_number = $1 AND deleted_at IS NULL
-      `;
-      clientsParams = [currentUserPhone];
-      
-      if (currentUserFirebaseUid) {
-        clientsQuery += ` AND owner_firebase_uid != $2`;
-        clientsParams.push(currentUserFirebaseUid);
-      }
-    } else if (currentUserFirebaseUid) {
-      // ✅ إذا كان currentUserFirebaseUid موجوداً فقط، استخدمه للبحث عن المستخدم ثم عملائه
+    // إذا لم يكن currentUserFirebaseUid موجوداً، نحاول البحث عنه من currentUserPhone
+    if (!ownerFirebaseUid && currentUserPhone) {
       const userResult = await pool.query(
-        'SELECT phone_number FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
-        [currentUserFirebaseUid]
+        'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL',
+        [currentUserPhone]
       );
       
       if (userResult.rows.length === 0) {
         return res.json({ success: true, data: [] });
       }
       
-      const userPhone = userResult.rows[0].phone_number;
-      if (!userPhone) {
+      ownerFirebaseUid = userResult.rows[0].firebase_uid;
+      if (!ownerFirebaseUid) {
         return res.json({ success: true, data: [] });
       }
-      
-      clientsQuery = `
-        SELECT client_id, owner_user_id, owner_firebase_uid
-        FROM business_clients
-        WHERE phone_number = $1 AND deleted_at IS NULL
-          AND owner_firebase_uid != $2
-      `;
-      clientsParams = [userPhone, currentUserFirebaseUid];
     }
     
-    const clientsResult = await pool.query(clientsQuery, clientsParams);
+    // ✅ البحث عن جميع عملاء المستخدم الحالي
+    const clientsResult = await pool.query(
+      `SELECT client_id, owner_user_id, owner_firebase_uid, client_name, phone_number
+       FROM business_clients
+       WHERE owner_firebase_uid = $1 AND deleted_at IS NULL`,
+      [ownerFirebaseUid]
+    );
+    
     const clients = clientsResult.rows;
     
+    logger.debug('getDebtSummary: Found clients', {
+      ownerFirebaseUid,
+      clientsCount: clients.length,
+      clientIds: clients.map(c => c.client_id)
+    });
+    
     if (clients.length === 0) {
+      logger.debug('getDebtSummary: No clients found for user', { ownerFirebaseUid });
       return res.json({ success: true, data: [] });
     }
     
-    // تجميع المعاملات حسب ownerFirebaseUid (الدائن)
+    // ✅ تجميع المعاملات حسب ownerFirebaseUid (الدائن)
+    // نحتاج إلى المعاملات التي تم إنشاؤها من قبل مستخدمين آخرين (دائنين)
     const creditorMap = new Map();
     
     for (const client of clients) {
@@ -755,14 +749,15 @@ async function getDebtSummary(req, res, next) {
          JOIN business_clients bc ON ft.client_id = bc.client_id
          WHERE ft.client_id = $1 
            AND ft.owner_firebase_uid != $2
+           AND ft.owner_firebase_uid IS NOT NULL
            AND ft.deleted_at IS NULL
          ORDER BY ft.transaction_date DESC`,
-        [client.client_id, currentUserFirebaseUid || '']
+        [client.client_id, ownerFirebaseUid]
       );
       
       for (const transaction of transactionsResult.rows) {
         const creditorUid = transaction.owner_firebase_uid;
-        if (!creditorUid || creditorUid === currentUserFirebaseUid) continue;
+        if (!creditorUid || creditorUid === ownerFirebaseUid) continue;
         
         if (!creditorMap.has(creditorUid)) {
           creditorMap.set(creditorUid, {
@@ -798,7 +793,7 @@ async function getDebtSummary(req, res, next) {
     const creditors = [];
     for (const [creditorUid, summary] of creditorMap.entries()) {
       const userResult = await pool.query(
-        'SELECT user_id, name, phone, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
+        'SELECT user_id, name, full_name, phone_number, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
         [creditorUid]
       );
       
@@ -809,8 +804,8 @@ async function getDebtSummary(req, res, next) {
       const lastTransaction = summary.transactions[0]; // تم ترتيبها DESC
       
       creditors.push({
-        creditorName: user.name || 'مستخدم مجهول',
-        creditorPhone: user.phone || '',
+        creditorName: user.name || user.full_name || 'مستخدم مجهول',
+        creditorPhone: user.phone_number || '',
         creditorJobTitle: user.job_title || null,
         creditorFirebaseUid: creditorUid,
         totalDebit: summary.totalDebit,
@@ -827,6 +822,12 @@ async function getDebtSummary(req, res, next) {
     
     // ترتيب حسب تاريخ آخر معاملة
     creditors.sort((a, b) => b.lastTransactionDate - a.lastTransactionDate);
+    
+    logger.debug('getDebtSummary: Returning creditors', {
+      ownerFirebaseUid,
+      creditorsCount: creditors.length,
+      creditorUids: creditors.map(c => c.creditorFirebaseUid)
+    });
     
     res.json({ success: true, data: creditors });
   } catch (error) {
