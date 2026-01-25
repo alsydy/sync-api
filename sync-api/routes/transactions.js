@@ -51,5 +51,11 @@ router.delete('/by-uuid/:transactionUuid', optionalAuthenticate, transactionCont
  */
 router.delete('/:transactionId', optionalAuthenticate, transactionController.deleteTransactionById);
 
+/**
+ * GET /api/transactions/debt-summary
+ * الحصول على إحصائيات الديون (creditor summaries)
+ */
+router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
+
 module.exports = router;
 
