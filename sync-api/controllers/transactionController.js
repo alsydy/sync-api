@@ -717,8 +717,25 @@ async function getDebtSummary(req, res, next) {
 
     const myPhone = meRes.rows?.[0]?.phone_number || null;
     if (!myPhone) {
+      logger.debug('getDebtSummary: No phone number found for user', { myFirebaseUid });
       return res.json({ success: true, data: [] });
     }
+
+    // ✅ التحقق من وجود عملاء برقم الهاتف
+    const clientsCheck = await pool.query(
+      `SELECT COUNT(*) as total, 
+              COUNT(CASE WHEN owner_firebase_uid != $2 THEN 1 END) as excluding_owner
+       FROM business_clients 
+       WHERE phone_number = $1 AND deleted_at IS NULL`,
+      [myPhone, myFirebaseUid]
+    );
+    
+    logger.debug('getDebtSummary: Clients check', {
+      myPhone,
+      myFirebaseUid,
+      totalClients: clientsCheck.rows[0]?.total || 0,
+      excludingOwner: clientsCheck.rows[0]?.excluding_owner || 0
+    });
 
     const sql = `
       WITH my_client_ids AS (
@@ -794,7 +811,12 @@ async function getDebtSummary(req, res, next) {
       myFirebaseUid,
       myPhone,
       rows: result.rows.length,
-      totalMs
+      totalMs,
+      sampleRow: result.rows.length > 0 ? {
+        recorder_uid: result.rows[0].recorder_firebase_uid,
+        full_name: result.rows[0].full_name,
+        transaction_count: result.rows[0].transaction_count
+      } : null
     });
 
     const users = result.rows.map((row) => {
