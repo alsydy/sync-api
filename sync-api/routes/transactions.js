@@ -29,11 +29,11 @@ router.get('/by-uuid/:transactionUuid', optionalAuthenticate, transactionControl
 router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
 
 /**
- * GET /api/transactions/debt-details/:recorderFirebaseUid
- * ✅ عند الضغط على مستخدم: عرض القيود التي سجّلها هذا المستخدم عليّ
+ * GET /api/transactions/debt-details/:creditorFirebaseUid
+ * ✅ عند الضغط على مستخدم: عرض القيود التي سجّلها هذا المستخدم (الدائن) عليّ
  * يجب أن يأتي قبل /:transactionId
  */
-router.get('/debt-details/:recorderFirebaseUid', optionalAuthenticate, transactionController.getDebtDetails);
+router.get('/debt-details/:creditorFirebaseUid', optionalAuthenticate, transactionController.getDebtDetails);
 
 /**
  * GET /api/transactions/:transactionId
