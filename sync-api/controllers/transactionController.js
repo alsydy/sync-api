@@ -25,6 +25,13 @@ const { sendTransactionNotification } = require('../services/fcmNotificationServ
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 
+// ----------------------------------------------------------------------------
+// Helpers (local)
+// ----------------------------------------------------------------------------
+function parseFirebaseUidFromAuth(req) {
+  return req.user?.firebase_uid || req.user?.firebaseUid || req.user?.uid || null;
+}
+
 /**
  * GET /api/transactions
  * الحصول على المعاملات
@@ -668,128 +675,127 @@ async function deleteTransactionById(req, res, next) {
 
 /**
  * GET /api/transactions/debt-summary
- * الحصول على إحصائيات الديون (creditor summaries)
- * Query params:
- *   - currentUserPhone: رقم هاتف المستخدم الحالي (اختياري)
- *   - currentUserFirebaseUid: معرف Firebase للمستخدم الحالي (مطلوب غالباً)
  *
- * ✅ تم إعادة كتابتها لاستعلام واحد فقط (بدون حلقات واستعلامات متعددة)
+ * ✅ السيناريو المطلوب:
+ * المستخدم الحالي (م2) يرى "من هم المستخدمون الذين سجّلوا قيوداً عليه/له"
+ *
+ * كيف نحدد "أنا" كمستهدف؟
+ * - نأخذ رقم الهاتف للمستخدم الحالي من app_users (firebase_uid = myUid)
+ * - ثم نبحث في business_clients عن العملاء الذين phone_number = رقمي
+ * - ثم نجلب معاملات financial_transactions لهذه client_id
+ * - ثم نجمع حسب owner_firebase_uid (المستخدم الذي سجّل القيد)
+ *
+ * Query params:
+ *   - currentUserFirebaseUid (اختياري إذا auth موجود)
+ *   - currentUserPhone (اختياري fallback)
  */
 async function getDebtSummary(req, res, next) {
   try {
     const { currentUserPhone, currentUserFirebaseUid } = req.query;
 
-    // إذا middleware يضيف المستخدم، خذ UID منه أولاً (أكثر أماناً)
-    const uidFromAuth = req.user?.firebase_uid || req.user?.firebaseUid || null;
+    const uidFromAuth = parseFirebaseUidFromAuth(req);
+    let myFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
 
-    let ownerFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
-
-    // إذا لم يوجد UID، نحاول جلبه من رقم الهاتف (كما في كودك)
-    if (!ownerFirebaseUid && currentUserPhone) {
-      const userResult = await pool.query(
-        'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL',
+    // fallback: إذا لا يوجد UID، نحاول من الهاتف (نجيب UID من app_users)
+    if (!myFirebaseUid && currentUserPhone) {
+      const r = await pool.query(
+        'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL LIMIT 1',
         [currentUserPhone]
       );
-
-      if (userResult.rows.length === 0) {
-        return res.json({ success: true, data: [] });
-      }
-
-      ownerFirebaseUid = userResult.rows[0].firebase_uid || null;
-      if (!ownerFirebaseUid) {
-        return res.json({ success: true, data: [] });
-      }
+      myFirebaseUid = r.rows?.[0]?.firebase_uid || null;
     }
 
-    if (!ownerFirebaseUid) {
-      return res.status(400).json({
-        success: false,
-        error: 'currentUserFirebaseUid مطلوب'
-      });
+    if (!myFirebaseUid) {
+      return res.status(400).json({ success: false, error: 'currentUserFirebaseUid مطلوب' });
+    }
+
+    // 1) نجيب رقم الهاتف الخاص بي (المستخدم الحالي)
+    const meRes = await pool.query(
+      'SELECT phone_number FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL LIMIT 1',
+      [myFirebaseUid]
+    );
+
+    const myPhone = meRes.rows?.[0]?.phone_number || null;
+    if (!myPhone) {
+      return res.json({ success: true, data: [] });
     }
 
     const sql = `
-      WITH my_clients AS (
-        SELECT client_id
-        FROM business_clients
-        WHERE owner_firebase_uid = $1
-          AND deleted_at IS NULL
+      WITH my_client_ids AS (
+        SELECT bc.client_id
+        FROM business_clients bc
+        WHERE bc.phone_number = $1
+          AND bc.deleted_at IS NULL
       ),
       tx AS (
         SELECT
-          ft.owner_firebase_uid AS creditor_uid,
+          ft.owner_firebase_uid AS recorder_uid,
           ft.transaction_amount,
-          COALESCE(ft.currency_code, 'IQD') AS currency_code,
           ft.transaction_direction,
           ft.transaction_date,
+          COALESCE(ft.currency_code, 'IQD') AS currency_code,
           CASE
             WHEN ft.transaction_direction IN ('expense','DEBIT','debit') THEN -ft.transaction_amount
             ELSE ft.transaction_amount
           END AS signed_amount
         FROM financial_transactions ft
-        WHERE ft.client_id IN (SELECT client_id FROM my_clients)
-          AND ft.owner_firebase_uid IS NOT NULL
-          AND ft.owner_firebase_uid <> $1
+        WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
           AND ft.deleted_at IS NULL
+          AND ft.owner_firebase_uid IS NOT NULL
+      ),
+      by_currency_base AS (
+        SELECT recorder_uid, currency_code, SUM(signed_amount) AS balance
+        FROM tx
+        GROUP BY recorder_uid, currency_code
       ),
       by_currency AS (
-        SELECT
-          creditor_uid,
-          jsonb_object_agg(currency_code, SUM(signed_amount)) AS balances_by_currency
-        FROM tx
-        GROUP BY creditor_uid
+        SELECT recorder_uid, jsonb_object_agg(currency_code, balance) AS balances_by_currency
+        FROM by_currency_base
+        GROUP BY recorder_uid
       ),
-      by_creditor AS (
+      by_user AS (
         SELECT
-          creditor_uid,
+          recorder_uid,
           COUNT(*) AS transaction_count,
           MAX(transaction_date) AS last_transaction_date,
-          SUM(CASE WHEN transaction_direction IN ('expense','DEBIT','debit') THEN transaction_amount ELSE 0 END) AS total_debit,
-          SUM(CASE WHEN transaction_direction IN ('expense','DEBIT','debit') THEN 0 ELSE transaction_amount END) AS total_credit
+          SUM(CASE WHEN signed_amount < 0 THEN -signed_amount ELSE 0 END) AS total_debit,
+          SUM(CASE WHEN signed_amount > 0 THEN  signed_amount ELSE 0 END) AS total_credit,
+          SUM(signed_amount) AS net_balance
         FROM tx
-        GROUP BY creditor_uid
-      ),
-      last_currency AS (
-        SELECT DISTINCT ON (creditor_uid)
-          creditor_uid,
-          currency_code
-        FROM tx
-        ORDER BY creditor_uid, transaction_date DESC NULLS LAST
+        GROUP BY recorder_uid
       )
       SELECT
         au.full_name,
         au.phone_number,
         au.job_title,
-        bc.creditor_uid AS creditor_firebase_uid,
-        bc.transaction_count,
-        bc.last_transaction_date,
-        bc.total_debit,
-        bc.total_credit,
-        (bc.total_credit - bc.total_debit) AS net_balance,
-        COALESCE(cur.balances_by_currency, '{}'::jsonb) AS balances_by_currency,
-        COALESCE(lc.currency_code, 'IQD') AS currency
-      FROM by_creditor bc
+        bu.recorder_uid AS recorder_firebase_uid,
+        bu.transaction_count,
+        bu.last_transaction_date,
+        bu.total_debit,
+        bu.total_credit,
+        bu.net_balance,
+        COALESCE(cur.balances_by_currency, '{}'::jsonb) AS balances_by_currency
+      FROM by_user bu
       JOIN app_users au
-        ON au.firebase_uid = bc.creditor_uid
+        ON au.firebase_uid = bu.recorder_uid
        AND au.deleted_at IS NULL
       LEFT JOIN by_currency cur
-        ON cur.creditor_uid = bc.creditor_uid
-      LEFT JOIN last_currency lc
-        ON lc.creditor_uid = bc.creditor_uid
-      ORDER BY bc.last_transaction_date DESC NULLS LAST;
+        ON cur.recorder_uid = bu.recorder_uid
+      ORDER BY bu.last_transaction_date DESC NULLS LAST;
     `;
 
     const t0 = Date.now();
-    const result = await pool.query(sql, [ownerFirebaseUid]);
+    const result = await pool.query(sql, [myPhone]);
     const totalMs = Date.now() - t0;
 
-    logger.debug('getDebtSummary: optimized query done', {
-      ownerFirebaseUid,
+    logger.debug('getDebtSummary: summary-for-me done', {
+      myFirebaseUid,
+      myPhone,
       rows: result.rows.length,
       totalMs
     });
 
-    const creditors = result.rows.map((row) => {
+    const users = result.rows.map((row) => {
       const totalDebit = row.total_debit !== null ? Number(row.total_debit) : 0;
       const totalCredit = row.total_credit !== null ? Number(row.total_credit) : 0;
       const netBalance = row.net_balance !== null ? Number(row.net_balance) : (totalCredit - totalDebit);
@@ -798,27 +804,108 @@ async function getDebtSummary(req, res, next) {
         ? new Date(row.last_transaction_date).getTime()
         : Date.now();
 
-      // jsonb يرجع كـ object غالباً في pg
-      const balancesByCurrency = row.balances_by_currency && typeof row.balances_by_currency === 'object'
-        ? row.balances_by_currency
-        : {};
+      const balancesByCurrency =
+        row.balances_by_currency && typeof row.balances_by_currency === 'object'
+          ? row.balances_by_currency
+          : {};
 
       return {
-        creditorName: row.full_name || 'مستخدم مجهول',
-        creditorPhone: row.phone_number || '',
-        creditorJobTitle: row.job_title || null,
-        creditorFirebaseUid: row.creditor_firebase_uid,
+        recorderName: row.full_name || 'مستخدم مجهول',
+        recorderPhone: row.phone_number || '',
+        recorderJobTitle: row.job_title || null,
+        recorderFirebaseUid: row.recorder_firebase_uid,
         totalDebit,
         totalCredit,
         netBalance,
         transactionCount: Number(row.transaction_count) || 0,
-        currency: row.currency || 'IQD',
         lastTransactionDate: Math.floor(lastDateMs),
         balancesByCurrency
       };
     });
 
-    res.json({ success: true, data: creditors });
+    res.json({ success: true, data: users });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * GET /api/transactions/debt-details/:recorderFirebaseUid
+ *
+ * ✅ عند النقر على مستخدم من شاشة المتابعة:
+ * نعرض كل القيود التي سجّلها هذا المستخدم (recorder) عليّ (أنا المستخدم الحالي)
+ *
+ * Params:
+ *   - recorderFirebaseUid (المستخدم الذي سجّل القيود)
+ * Query:
+ *   - currentUserFirebaseUid (اختياري إذا auth موجود)
+ *   - currentUserPhone (اختياري fallback)
+ */
+async function getDebtDetails(req, res, next) {
+  try {
+    const { recorderFirebaseUid } = req.params;
+    const { currentUserPhone, currentUserFirebaseUid, limit, offset } = req.query;
+
+    if (!recorderFirebaseUid) {
+      return res.status(400).json({ success: false, error: 'recorderFirebaseUid مطلوب' });
+    }
+
+    const uidFromAuth = parseFirebaseUidFromAuth(req);
+    let myFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
+
+    if (!myFirebaseUid && currentUserPhone) {
+      const r = await pool.query(
+        'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL LIMIT 1',
+        [currentUserPhone]
+      );
+      myFirebaseUid = r.rows?.[0]?.firebase_uid || null;
+    }
+
+    if (!myFirebaseUid) {
+      return res.status(400).json({ success: false, error: 'currentUserFirebaseUid مطلوب' });
+    }
+
+    const meRes = await pool.query(
+      'SELECT phone_number FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL LIMIT 1',
+      [myFirebaseUid]
+    );
+
+    const myPhone = meRes.rows?.[0]?.phone_number || null;
+    if (!myPhone) {
+      return res.json({ success: true, data: [], count: 0 });
+    }
+
+    let q = `
+      WITH my_client_ids AS (
+        SELECT bc.client_id
+        FROM business_clients bc
+        WHERE bc.phone_number = $1
+          AND bc.deleted_at IS NULL
+      )
+      SELECT ft.*
+      FROM financial_transactions ft
+      WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
+        AND ft.owner_firebase_uid = $2
+        AND ft.deleted_at IS NULL
+      ORDER BY ft.transaction_date DESC, ft.updated_at DESC, ft.created_at DESC
+    `;
+
+    const params = [myPhone, recorderFirebaseUid];
+    let idx = 3;
+
+    if (limit) {
+      q += ` LIMIT $${idx++}`;
+      params.push(parseInt(limit));
+    }
+    if (offset) {
+      q += ` OFFSET $${idx++}`;
+      params.push(parseInt(offset));
+    }
+
+    const result = await pool.query(q, params);
+    const transactions = result.rows.map((row) => mapTransactionToAPI(row));
+
+    res.json({ success: true, data: transactions, count: transactions.length });
   } catch (error) {
     next(error);
   }
@@ -832,5 +919,6 @@ module.exports = {
   syncTransaction,
   deleteTransactionByUuid,
   deleteTransactionById,
-  getDebtSummary
+  getDebtSummary,   // ✅ ملخص "من سجّل عليّ"
+  getDebtDetails    // ✅ تفاصيل القيود عند الضغط
 };
