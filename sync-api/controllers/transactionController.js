@@ -726,6 +726,7 @@ async function getDebtSummary(req, res, next) {
         FROM business_clients bc
         WHERE bc.phone_number = $1
           AND bc.deleted_at IS NULL
+          AND bc.owner_firebase_uid != $2
       ),
       tx AS (
         SELECT
@@ -742,6 +743,7 @@ async function getDebtSummary(req, res, next) {
         WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
           AND ft.deleted_at IS NULL
           AND ft.owner_firebase_uid IS NOT NULL
+          AND ft.owner_firebase_uid != $2
       ),
       by_currency_base AS (
         SELECT recorder_uid, currency_code, SUM(signed_amount) AS balance
@@ -785,7 +787,7 @@ async function getDebtSummary(req, res, next) {
     `;
 
     const t0 = Date.now();
-    const result = await pool.query(sql, [myPhone]);
+    const result = await pool.query(sql, [myPhone, myFirebaseUid]);
     const totalMs = Date.now() - t0;
 
     logger.debug('getDebtSummary: summary-for-me done', {
@@ -809,15 +811,22 @@ async function getDebtSummary(req, res, next) {
           ? row.balances_by_currency
           : {};
 
+      // تحديد العملة الأساسية (الأكثر استخداماً أو الأكبر رصيداً)
+      const primaryCurrency = Object.keys(balancesByCurrency).length > 0
+        ? Object.entries(balancesByCurrency)
+            .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][0]
+        : 'YER';
+
       return {
-        recorderName: row.full_name || 'مستخدم مجهول',
-        recorderPhone: row.phone_number || '',
-        recorderJobTitle: row.job_title || null,
-        recorderFirebaseUid: row.recorder_firebase_uid,
+        creditorName: row.full_name || 'مستخدم مجهول',
+        creditorPhone: row.phone_number || '',
+        creditorJobTitle: row.job_title || null,
+        creditorFirebaseUid: row.recorder_firebase_uid,
         totalDebit,
         totalCredit,
         netBalance,
         transactionCount: Number(row.transaction_count) || 0,
+        currency: primaryCurrency,
         lastTransactionDate: Math.floor(lastDateMs),
         balancesByCurrency
       };
@@ -830,24 +839,24 @@ async function getDebtSummary(req, res, next) {
 }
 
 /**
- * GET /api/transactions/debt-details/:recorderFirebaseUid
+ * GET /api/transactions/debt-details/:creditorFirebaseUid
  *
  * ✅ عند النقر على مستخدم من شاشة المتابعة:
- * نعرض كل القيود التي سجّلها هذا المستخدم (recorder) عليّ (أنا المستخدم الحالي)
+ * نعرض كل القيود التي سجّلها هذا المستخدم (الدائن) عليّ (أنا المستخدم الحالي)
  *
  * Params:
- *   - recorderFirebaseUid (المستخدم الذي سجّل القيود)
+ *   - creditorFirebaseUid (المستخدم الذي سجّل القيود - الدائن)
  * Query:
  *   - currentUserFirebaseUid (اختياري إذا auth موجود)
  *   - currentUserPhone (اختياري fallback)
  */
 async function getDebtDetails(req, res, next) {
   try {
-    const { recorderFirebaseUid } = req.params;
+    const { creditorFirebaseUid } = req.params;
     const { currentUserPhone, currentUserFirebaseUid, limit, offset } = req.query;
 
-    if (!recorderFirebaseUid) {
-      return res.status(400).json({ success: false, error: 'recorderFirebaseUid مطلوب' });
+    if (!creditorFirebaseUid) {
+      return res.status(400).json({ success: false, error: 'creditorFirebaseUid مطلوب' });
     }
 
     const uidFromAuth = parseFirebaseUidFromAuth(req);
@@ -881,16 +890,21 @@ async function getDebtDetails(req, res, next) {
         FROM business_clients bc
         WHERE bc.phone_number = $1
           AND bc.deleted_at IS NULL
+          AND bc.owner_firebase_uid != $3
       )
-      SELECT ft.*
+      SELECT 
+        ft.*,
+        ca.account_name,
+        ca.account_id
       FROM financial_transactions ft
+      LEFT JOIN cash_accounts ca ON ft.account_id = ca.account_id AND ca.deleted_at IS NULL
       WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
         AND ft.owner_firebase_uid = $2
         AND ft.deleted_at IS NULL
       ORDER BY ft.transaction_date DESC, ft.updated_at DESC, ft.created_at DESC
     `;
 
-    const params = [myPhone, recorderFirebaseUid];
+    const params = [myPhone, creditorFirebaseUid, myFirebaseUid];
     let idx = 3;
 
     if (limit) {
