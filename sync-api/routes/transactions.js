@@ -23,15 +23,22 @@ router.get('/by-uuid/:transactionUuid', optionalAuthenticate, transactionControl
 
 /**
  * GET /api/transactions/debt-summary
- * الحصول على إحصائيات الديون (creditor summaries)
- * ✅ يجب أن يأتي قبل /:transactionId لأن Express يطابق routes بالترتيب
+ * ✅ السيناريو المطلوب: المستخدم يرى من سجّل عليه/له قيوداً (ملخص)
+ * يجب أن يأتي قبل /:transactionId
  */
 router.get('/debt-summary', optionalAuthenticate, transactionController.getDebtSummary);
 
 /**
+ * GET /api/transactions/debt-details/:recorderFirebaseUid
+ * ✅ عند الضغط على مستخدم: عرض القيود التي سجّلها هذا المستخدم عليّ
+ * يجب أن يأتي قبل /:transactionId
+ */
+router.get('/debt-details/:recorderFirebaseUid', optionalAuthenticate, transactionController.getDebtDetails);
+
+/**
  * GET /api/transactions/:transactionId
  * الحصول على معاملة محددة
- * ⚠️ يجب أن يأتي بعد جميع routes المحددة (مثل /debt-summary)
+ * ⚠️ يجب أن يأتي بعد جميع routes المحددة
  */
 router.get('/:transactionId', optionalAuthenticate, transactionController.getTransactionById);
 
@@ -60,4 +67,3 @@ router.delete('/by-uuid/:transactionUuid', optionalAuthenticate, transactionCont
 router.delete('/:transactionId', optionalAuthenticate, transactionController.deleteTransactionById);
 
 module.exports = router;
-
