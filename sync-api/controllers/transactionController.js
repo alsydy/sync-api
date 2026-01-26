@@ -723,19 +723,45 @@ async function getDebtSummary(req, res, next) {
 
     // ✅ التحقق من وجود عملاء برقم الهاتف
     const clientsCheck = await pool.query(
-      `SELECT COUNT(*) as total, 
-              COUNT(CASE WHEN owner_firebase_uid != $2 THEN 1 END) as excluding_owner
+      `SELECT 
+         COUNT(*) as total, 
+         COUNT(CASE WHEN owner_firebase_uid != $2 THEN 1 END) as excluding_owner,
+         COUNT(CASE WHEN owner_firebase_uid = $2 THEN 1 END) as owned_by_me,
+         array_agg(DISTINCT owner_firebase_uid) FILTER (WHERE owner_firebase_uid IS NOT NULL) as owner_uids
        FROM business_clients 
        WHERE phone_number = $1 AND deleted_at IS NULL`,
       [myPhone, myFirebaseUid]
     );
     
+    const checkRow = clientsCheck.rows[0];
     logger.debug('getDebtSummary: Clients check', {
       myPhone,
       myFirebaseUid,
-      totalClients: clientsCheck.rows[0]?.total || 0,
-      excludingOwner: clientsCheck.rows[0]?.excluding_owner || 0
+      totalClients: parseInt(checkRow?.total || 0),
+      excludingOwner: parseInt(checkRow?.excluding_owner || 0),
+      ownedByMe: parseInt(checkRow?.owned_by_me || 0),
+      ownerUids: checkRow?.owner_uids || []
     });
+    
+    // ✅ التحقق من وجود معاملات
+    if (parseInt(checkRow?.excluding_owner || 0) > 0) {
+      const transactionsCheck = await pool.query(
+        `SELECT COUNT(*) as tx_count
+         FROM financial_transactions ft
+         JOIN business_clients bc ON ft.client_id = bc.client_id
+         WHERE bc.phone_number = $1
+           AND bc.deleted_at IS NULL
+           AND bc.owner_firebase_uid != $2
+           AND ft.deleted_at IS NULL
+           AND ft.owner_firebase_uid IS NOT NULL
+           AND ft.owner_firebase_uid != $2`,
+        [myPhone, myFirebaseUid]
+      );
+      
+      logger.debug('getDebtSummary: Transactions check', {
+        transactionCount: parseInt(transactionsCheck.rows[0]?.tx_count || 0)
+      });
+    }
 
     const sql = `
       WITH my_client_ids AS (
