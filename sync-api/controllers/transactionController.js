@@ -697,7 +697,7 @@ async function deleteTransactionById(req, res, next) {
  */
 async function getDebtSummary(req, res, next) {
   try {
-    const { currentUserPhone, currentUserFirebaseUid } = req.query;
+    const { currentUserPhone, currentUserFirebaseUid, currency } = req.query;
 
     const uidFromAuth = parseFirebaseUidFromAuth(req);
     let myFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
@@ -728,7 +728,7 @@ async function getDebtSummary(req, res, next) {
     }
 
     // ✅ (اختياري) طباعة تشخيص سريع
-    logger.debug('getDebtSummary: identity resolved', { myFirebaseUid, myPhone });
+    logger.debug('getDebtSummary: identity resolved', { myFirebaseUid, myPhone, currency });
 
     // ✅ هذا هو الاستعلام الصحيح للسيناريو: "من سجّل عليّ؟"
     const sql = `
@@ -793,11 +793,13 @@ async function getDebtSummary(req, res, next) {
        AND au.deleted_at IS NULL
       LEFT JOIN by_currency cur
         ON cur.recorder_uid = bu.recorder_uid
+      WHERE ($3::text IS NULL OR (cur.balances_by_currency IS NOT NULL AND cur.balances_by_currency ? $3::text))
       ORDER BY bu.last_transaction_date DESC NULLS LAST;
     `;
 
     const t0 = Date.now();
-    const result = await pool.query(sql, [myPhone, myFirebaseUid]);
+    // ✅ إذا تم تمرير currency، نفلتر الدائنين الذين لديهم رصيد في هذه العملة
+    const result = await pool.query(sql, [myPhone, myFirebaseUid, currency || null]);
     const totalMs = Date.now() - t0;
 
     logger.debug('getDebtSummary: done', {
@@ -833,7 +835,7 @@ async function getDebtSummary(req, res, next) {
         creditorFirebaseUid: row.recorder_firebase_uid,
         totalDebit,
         totalCredit,
-        netBalance,
+        netBalance, // ✅ الرصيد الإجمالي (يتم الفلترة حسب العملة في التطبيق)
         transactionCount: Number(row.transaction_count) || 0,
         currency: primaryCurrency,
         lastTransactionDate: Math.floor(lastDateMs),
