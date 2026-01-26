@@ -111,6 +111,7 @@ function mapTransactionToAPI(row) {
     customerId: row.client_id,
     clientId: row.client_id,
     accountId: row.account_id,
+    accountName: row.account_name || null, // ✅ إضافة accountName
     customerFirestoreId: row.client_firestore_id,
     clientFirestoreId: row.client_firestore_id,
     accountFirestoreId: row.account_firestore_id,
