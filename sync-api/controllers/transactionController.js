@@ -32,11 +32,11 @@ const { v4: uuidv4 } = require('uuid');
 async function getTransactions(req, res, next) {
   try {
     const { ownerUserId, ownerFirebaseUid, customerId, clientId, accountId, synced, limit, offset, sinceTimestamp } = req.query;
-    
+
     let query = 'SELECT * FROM financial_transactions WHERE deleted_at IS NULL';
     const params = [];
     let paramIndex = 1;
-    
+
     if (ownerUserId) {
       query += ` AND owner_user_id = $${paramIndex++}`;
       params.push(ownerUserId);
@@ -57,7 +57,7 @@ async function getTransactions(req, res, next) {
       query += ` AND is_synced = $${paramIndex++}`;
       params.push(intToBoolean(synced));
     }
-    
+
     // دعم المزامنة التزايدية
     if (sinceTimestamp) {
       const sinceSeconds = msToSeconds(parseInt(sinceTimestamp));
@@ -66,9 +66,9 @@ async function getTransactions(req, res, next) {
         params.push(sinceSeconds);
       }
     }
-    
+
     query += ' ORDER BY updated_at DESC, transaction_date DESC, created_at DESC';
-    
+
     if (limit) {
       query += ` LIMIT $${paramIndex++}`;
       params.push(parseInt(limit));
@@ -77,11 +77,10 @@ async function getTransactions(req, res, next) {
       query += ` OFFSET $${paramIndex++}`;
       params.push(parseInt(offset));
     }
-    
+
     const result = await pool.query(query, params);
-    
     const transactions = result.rows.map(row => mapTransactionToAPI(row));
-    
+
     res.json({ success: true, data: transactions, count: transactions.length });
   } catch (error) {
     next(error);
@@ -95,20 +94,20 @@ async function getTransactions(req, res, next) {
 async function getTransactionByUuid(req, res, next) {
   try {
     const { transactionUuid } = req.params;
-    
+
     if (!transactionUuid) {
       return res.status(400).json({ success: false, error: 'transactionUuid مطلوب' });
     }
-    
+
     const result = await pool.query(
       'SELECT * FROM financial_transactions WHERE transaction_uuid = $1 AND deleted_at IS NULL',
       [transactionUuid]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'المعاملة غير موجودة' });
     }
-    
+
     res.json({ success: true, data: mapTransactionToAPI(result.rows[0]) });
   } catch (error) {
     next(error);
@@ -122,36 +121,36 @@ async function getTransactionByUuid(req, res, next) {
 async function getTransactionById(req, res, next) {
   try {
     const { transactionId } = req.params;
-    
+
     // التحقق من أن transactionId ليس كلمة محجوزة
     const reservedWords = ['sync', 'health', 'info', 'stats'];
-    if (reservedWords.includes(transactionId.toLowerCase())) {
+    if (reservedWords.includes(String(transactionId).toLowerCase())) {
       return res.status(400).json({
         success: false,
         error: `Invalid transaction ID: "${transactionId}" is a reserved word`
       });
     }
-    
+
     // التحقق من أن transactionId هو رقم (BIGINT) أو UUID
     const isNumeric = /^\d+$/.test(transactionId);
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(transactionId);
-    
+
     if (!isNumeric && !isUUID) {
       return res.status(400).json({
         success: false,
         error: `Invalid transaction ID format: "${transactionId}" must be a number or UUID`
       });
     }
-    
+
     const result = await pool.query(
       'SELECT * FROM financial_transactions WHERE transaction_id = $1 AND deleted_at IS NULL',
       [transactionId]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'المعاملة غير موجودة' });
     }
-    
+
     res.json({ success: true, data: mapTransactionToAPI(result.rows[0]) });
   } catch (error) {
     next(error);
@@ -165,10 +164,10 @@ async function getTransactionById(req, res, next) {
 async function createTransaction(req, res, next) {
   try {
     const transactionData = ensureUuid(req.body);
-    
+
     // الحصول على ownerUserId الصحيح
     const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-    
+
     const result = await pool.query(
       `INSERT INTO financial_transactions (
         transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
@@ -179,7 +178,9 @@ async function createTransaction(req, res, next) {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP)
       RETURNING *`,
       [
-        (transactionData.transactionUuid && isValidUUID(transactionData.transactionUuid)) ? transactionData.transactionUuid : ((transactionData.entryId && isValidUUID(transactionData.entryId)) ? transactionData.entryId : uuidv4()),
+        (transactionData.transactionUuid && isValidUUID(transactionData.transactionUuid))
+          ? transactionData.transactionUuid
+          : ((transactionData.entryId && isValidUUID(transactionData.entryId)) ? transactionData.entryId : uuidv4()),
         transactionData.cloudId || null,
         transactionData.firestoreId || null,
         ownerUserId,
@@ -201,9 +202,9 @@ async function createTransaction(req, res, next) {
         msToSeconds(transactionData.createdAt || Date.now())
       ]
     );
-    
+
     const transaction = result.rows[0];
-    
+
     await logAudit(
       transaction.owner_user_id,
       transaction.owner_firebase_uid,
@@ -214,7 +215,7 @@ async function createTransaction(req, res, next) {
       transaction,
       req
     );
-    
+
     res.status(201).json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
     next(error);
@@ -229,19 +230,19 @@ async function syncTransaction(req, res, next) {
   try {
     const transactionData = ensureUuid(req.body);
     const uuid = transactionData.transactionUuid || (transactionData.entryId && isValidUUID(transactionData.entryId) ? transactionData.entryId : uuidv4());
-    
+
     if (!uuid) {
       return res.status(400).json({ success: false, error: 'transactionUuid أو entryId مطلوب' });
     }
-    
+
     const existing = await pool.query(
       'SELECT transaction_id, sync_version, updated_at FROM financial_transactions WHERE transaction_uuid = $1',
       [uuid]
     );
-    
+
     if (existing.rows.length > 0) {
       const existingTransaction = existing.rows[0];
-      
+
       // حل التعارضات
       if (transactionData.syncVersion && existingTransaction.sync_version) {
         const conflictResult = await resolveConflict('financial_transactions', uuid, transactionData, {
@@ -260,10 +261,10 @@ async function syncTransaction(req, res, next) {
           });
         }
       }
-      
+
       // الحصول على ownerUserId الصحيح
       const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-      
+
       if (!ownerUserId) {
         logger.error('ownerUserId is null in UPDATE transaction', { transactionData });
         return res.status(400).json({
@@ -271,19 +272,19 @@ async function syncTransaction(req, res, next) {
           error: 'ownerUserId مطلوب - لا يمكن العثور على المستخدم في قاعدة البيانات. يرجى التأكد من أن المستخدم مسجل في النظام.'
         });
       }
-      
+
       // الحصول على clientId الصحيح
       const clientId = await normalizeClientId(
         transactionData.customerId || transactionData.clientId,
         transactionData.customerFirestoreId || transactionData.clientFirestoreId
       );
-      
+
       // الحصول على accountId الصحيح
       const accountId = await normalizeAccountId(
         transactionData.accountId,
         transactionData.accountFirestoreId
       );
-      
+
       if (!accountId) {
         logger.error('accountId is null in UPDATE transaction', { transactionData });
         return res.status(400).json({
@@ -291,7 +292,7 @@ async function syncTransaction(req, res, next) {
           error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
         });
       }
-      
+
       // تحديث المعاملة الموجودة
       const result = await pool.query(
         `UPDATE financial_transactions SET
@@ -338,9 +339,9 @@ async function syncTransaction(req, res, next) {
           transactionData.syncVersion || existingTransaction.sync_version || 0
         ]
       );
-      
+
       const transaction = result.rows[0];
-      
+
       await logAudit(
         transaction.owner_user_id,
         transaction.owner_firebase_uid,
@@ -351,21 +352,19 @@ async function syncTransaction(req, res, next) {
         transaction,
         req
       );
-      
+
       // ✅ إرسال إشعار FCM إذا كان notify_customer = true
       if (transaction.notify_customer) {
-        // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
         setImmediate(async () => {
           try {
-            // جلب بيانات العميل والمالك
             const [customerResult, ownerResult] = await Promise.all([
               pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
               pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
             ]);
-            
+
             const customer = customerResult.rows[0];
             const owner = ownerResult.rows[0];
-            
+
             if (customer && owner && customer.phone_number) {
               logger.info('Sending transaction notification', {
                 transactionUuid: transaction.transaction_uuid,
@@ -373,12 +372,12 @@ async function syncTransaction(req, res, next) {
                 customerPhone: customer.phone_number,
                 ownerId: owner.user_id
               });
-              
-              const result = await sendTransactionNotification(transaction, customer, owner);
-              if (!result.success) {
+
+              const notifResult = await sendTransactionNotification(transaction, customer, owner);
+              if (!notifResult.success) {
                 logger.warning('Transaction notification failed', {
                   transactionUuid: transaction.transaction_uuid,
-                  reason: result.reason || result.error
+                  reason: notifResult.reason || notifResult.error
                 });
               }
             } else {
@@ -390,7 +389,6 @@ async function syncTransaction(req, res, next) {
               });
             }
           } catch (notifError) {
-            // لا نوقف العملية إذا فشل الإشعار
             logger.error('Error sending transaction notification', {
               error: notifError.message,
               stack: notifError.stack,
@@ -399,24 +397,22 @@ async function syncTransaction(req, res, next) {
           }
         });
       }
-      
+
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
     } else {
-      // الحصول على ownerUserId الصحيح
+      // INSERT جديد
       const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-      
-      // الحصول على clientId الصحيح
+
       const clientId = await normalizeClientId(
         transactionData.customerId || transactionData.clientId,
         transactionData.customerFirestoreId || transactionData.clientFirestoreId
       );
-      
-      // الحصول على accountId الصحيح
+
       let accountId = await normalizeAccountId(
         transactionData.accountId,
         transactionData.accountFirestoreId
       );
-      
+
       // إذا كان accountFirestoreId هو "shared-main-account-v1" ولم يُوجد، أنشئه
       if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
         logger.info(`Creating shared main account with ownerUserId: ${ownerUserId}`);
@@ -426,7 +422,7 @@ async function syncTransaction(req, res, next) {
           const createdAtSeconds = msToSeconds(now);
           const colorValue = 0xFF0A84FF;
           const colorHex = normalizeColorCode(colorValue);
-          
+
           const createResult = await pool.query(
             `INSERT INTO cash_accounts (
               account_uuid, firestore_id, owner_user_id, owner_firebase_uid, account_name, is_primary, is_shared,
@@ -452,7 +448,7 @@ async function syncTransaction(req, res, next) {
               createdAtSeconds
             ]
           );
-          
+
           if (createResult.rows.length > 0) {
             accountId = createResult.rows[0].account_id;
             logger.info(`Created shared main account with account_id: ${accountId}`);
@@ -465,7 +461,7 @@ async function syncTransaction(req, res, next) {
           }
         }
       }
-      
+
       if (!accountId) {
         logger.error('accountId is null in INSERT transaction', { transactionData });
         return res.status(400).json({
@@ -473,8 +469,7 @@ async function syncTransaction(req, res, next) {
           error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
         });
       }
-      
-      // إنشاء معاملة جديدة
+
       const result = await pool.query(
         `INSERT INTO financial_transactions (
           transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
@@ -507,34 +502,31 @@ async function syncTransaction(req, res, next) {
           msToSeconds(transactionData.createdAt || Date.now())
         ]
       );
-      
+
       const transaction = result.rows[0];
-      
+
       await logAudit(
-        transaction.owner_user_id, 
-        transaction.owner_firebase_uid, 
-        'create', 
-        'transaction', 
-        transaction.transaction_id.toString(), 
-        null, 
-        transaction, 
+        transaction.owner_user_id,
+        transaction.owner_firebase_uid,
+        'create',
+        'transaction',
+        transaction.transaction_id.toString(),
+        null,
+        transaction,
         req
       );
-      
-      // ✅ إرسال إشعار FCM إذا كان notify_customer = true
+
       if (transaction.notify_customer) {
-        // إرسال الإشعار في الخلفية (لا ننتظر النتيجة)
         setImmediate(async () => {
           try {
-            // جلب بيانات العميل والمالك
             const [customerResult, ownerResult] = await Promise.all([
               pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
               pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
             ]);
-            
+
             const customer = customerResult.rows[0];
             const owner = ownerResult.rows[0];
-            
+
             if (customer && owner && customer.phone_number) {
               logger.info('Sending transaction notification', {
                 transactionUuid: transaction.transaction_uuid,
@@ -542,12 +534,12 @@ async function syncTransaction(req, res, next) {
                 customerPhone: customer.phone_number,
                 ownerId: owner.user_id
               });
-              
-              const result = await sendTransactionNotification(transaction, customer, owner);
-              if (!result.success) {
+
+              const notifResult = await sendTransactionNotification(transaction, customer, owner);
+              if (!notifResult.success) {
                 logger.warning('Transaction notification failed', {
                   transactionUuid: transaction.transaction_uuid,
-                  reason: result.reason || result.error
+                  reason: notifResult.reason || notifResult.error
                 });
               }
             } else {
@@ -559,7 +551,6 @@ async function syncTransaction(req, res, next) {
               });
             }
           } catch (notifError) {
-            // لا نوقف العملية إذا فشل الإشعار
             logger.error('Error sending transaction notification', {
               error: notifError.message,
               stack: notifError.stack,
@@ -568,7 +559,7 @@ async function syncTransaction(req, res, next) {
           }
         });
       }
-      
+
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
     }
   } catch (error) {
@@ -583,11 +574,11 @@ async function syncTransaction(req, res, next) {
 async function deleteTransactionByUuid(req, res, next) {
   try {
     const { transactionUuid } = req.params;
-    
+
     if (!transactionUuid) {
       return res.status(400).json({ success: false, error: 'transactionUuid مطلوب' });
     }
-    
+
     const result = await pool.query(
       `UPDATE financial_transactions
        SET deleted_at = CURRENT_TIMESTAMP, sync_version = sync_version + 1, updated_at = CURRENT_TIMESTAMP
@@ -595,11 +586,11 @@ async function deleteTransactionByUuid(req, res, next) {
        RETURNING *`,
       [transactionUuid]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'المعاملة غير موجودة' });
     }
-    
+
     const transaction = result.rows[0];
     await logAudit(
       transaction.owner_user_id,
@@ -611,7 +602,7 @@ async function deleteTransactionByUuid(req, res, next) {
       transaction,
       req
     );
-    
+
     res.json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
     next(error);
@@ -625,41 +616,39 @@ async function deleteTransactionByUuid(req, res, next) {
 async function deleteTransactionById(req, res, next) {
   try {
     const { transactionId } = req.params;
-    
-    // التحقق من أن transactionId ليس كلمة محجوزة
+
     const reservedWords = ['sync', 'health', 'info', 'stats'];
-    if (reservedWords.includes(transactionId.toLowerCase())) {
+    if (reservedWords.includes(String(transactionId).toLowerCase())) {
       return res.status(400).json({
         success: false,
         error: `Invalid transaction ID: "${transactionId}" is a reserved word`
       });
     }
-    
-    // التحقق من أن transactionId هو رقم (BIGINT) أو UUID
+
     const isNumeric = /^\d+$/.test(transactionId);
     const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(transactionId);
-    
+
     if (!isNumeric && !isUUID) {
       return res.status(400).json({
         success: false,
         error: `Invalid transaction ID format: "${transactionId}" must be a number or UUID`
       });
     }
-    
+
     const result = await pool.query(
-      `UPDATE financial_transactions 
+      `UPDATE financial_transactions
        SET deleted_at = CURRENT_TIMESTAMP, sync_version = sync_version + 1, updated_at = CURRENT_TIMESTAMP
        WHERE transaction_id = $1 AND deleted_at IS NULL
        RETURNING *`,
       [transactionId]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ success: false, error: 'المعاملة غير موجودة' });
     }
-    
+
     const transaction = result.rows[0];
-    
+
     await logAudit(
       transaction.owner_user_id,
       transaction.owner_firebase_uid,
@@ -670,7 +659,7 @@ async function deleteTransactionById(req, res, next) {
       null,
       req
     );
-    
+
     res.json({ success: true, message: 'تم حذف المعاملة بنجاح' });
   } catch (error) {
     next(error);
@@ -681,154 +670,154 @@ async function deleteTransactionById(req, res, next) {
  * GET /api/transactions/debt-summary
  * الحصول على إحصائيات الديون (creditor summaries)
  * Query params:
- *   - currentUserPhone: رقم هاتف المستخدم الحالي
- *   - currentUserId: معرف المستخدم الحالي (local ID)
- *   - currentUserFirebaseUid: معرف Firebase للمستخدم الحالي
+ *   - currentUserPhone: رقم هاتف المستخدم الحالي (اختياري)
+ *   - currentUserFirebaseUid: معرف Firebase للمستخدم الحالي (مطلوب غالباً)
+ *
+ * ✅ تم إعادة كتابتها لاستعلام واحد فقط (بدون حلقات واستعلامات متعددة)
  */
 async function getDebtSummary(req, res, next) {
   try {
-    const { currentUserPhone, currentUserId, currentUserFirebaseUid } = req.query;
-    
-    if (!currentUserFirebaseUid) {
-      return res.status(400).json({
-        success: false,
-        error: 'currentUserFirebaseUid مطلوب'
-      });
-    }
-    
-    // ✅ البحث عن جميع عملاء المستخدم الحالي (الذين يملكهم)
-    // نحتاج إلى معرفة owner_firebase_uid للمستخدم الحالي
-    let ownerFirebaseUid = currentUserFirebaseUid;
-    
-    // إذا لم يكن currentUserFirebaseUid موجوداً، نحاول البحث عنه من currentUserPhone
+    const { currentUserPhone, currentUserFirebaseUid } = req.query;
+
+    // إذا middleware يضيف المستخدم، خذ UID منه أولاً (أكثر أماناً)
+    const uidFromAuth = req.user?.firebase_uid || req.user?.firebaseUid || null;
+
+    let ownerFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
+
+    // إذا لم يوجد UID، نحاول جلبه من رقم الهاتف (كما في كودك)
     if (!ownerFirebaseUid && currentUserPhone) {
       const userResult = await pool.query(
         'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL',
         [currentUserPhone]
       );
-      
+
       if (userResult.rows.length === 0) {
         return res.json({ success: true, data: [] });
       }
-      
-      ownerFirebaseUid = userResult.rows[0].firebase_uid;
+
+      ownerFirebaseUid = userResult.rows[0].firebase_uid || null;
       if (!ownerFirebaseUid) {
         return res.json({ success: true, data: [] });
       }
     }
-    
-    // ✅ البحث عن جميع عملاء المستخدم الحالي
-    const clientsResult = await pool.query(
-      `SELECT client_id, owner_user_id, owner_firebase_uid, client_name, phone_number
-       FROM business_clients
-       WHERE owner_firebase_uid = $1 AND deleted_at IS NULL`,
-      [ownerFirebaseUid]
-    );
-    
-    const clients = clientsResult.rows;
-    
-    logger.debug('getDebtSummary: Found clients', {
-      ownerFirebaseUid,
-      clientsCount: clients.length,
-      clientIds: clients.map(c => c.client_id)
-    });
-    
-    if (clients.length === 0) {
-      logger.debug('getDebtSummary: No clients found for user', { ownerFirebaseUid });
-      return res.json({ success: true, data: [] });
-    }
-    
-    // ✅ تجميع المعاملات حسب ownerFirebaseUid (الدائن)
-    // نحتاج إلى المعاملات التي تم إنشاؤها من قبل مستخدمين آخرين (دائنين)
-    const creditorMap = new Map();
-    
-    for (const client of clients) {
-      const transactionsResult = await pool.query(
-        `SELECT ft.*, bc.client_name, bc.phone_number
-         FROM financial_transactions ft
-         JOIN business_clients bc ON ft.client_id = bc.client_id
-         WHERE ft.client_id = $1 
-           AND ft.owner_firebase_uid != $2
-           AND ft.owner_firebase_uid IS NOT NULL
-           AND ft.deleted_at IS NULL
-         ORDER BY ft.transaction_date DESC`,
-        [client.client_id, ownerFirebaseUid]
-      );
-      
-      for (const transaction of transactionsResult.rows) {
-        const creditorUid = transaction.owner_firebase_uid;
-        if (!creditorUid || creditorUid === ownerFirebaseUid) continue;
-        
-        if (!creditorMap.has(creditorUid)) {
-          creditorMap.set(creditorUid, {
-            creditorFirebaseUid: creditorUid,
-            transactions: [],
-            totalDebit: 0,
-            totalCredit: 0,
-            balancesByCurrency: {}
-          });
-        }
-        
-        const summary = creditorMap.get(creditorUid);
-        summary.transactions.push(transaction);
-        
-        const amount = parseFloat(transaction.transaction_amount);
-        const currency = transaction.currency_code || 'IQD';
-        
-        // ✅ قاعدة البيانات تحفظ income/expense، لكن نحتاج DEBIT/CREDIT
-        const direction = transaction.transaction_direction;
-        const isDebit = direction === 'expense' || direction === 'DEBIT';
-        
-        if (isDebit) {
-          summary.totalDebit += amount;
-          summary.balancesByCurrency[currency] = (summary.balancesByCurrency[currency] || 0) - amount;
-        } else {
-          summary.totalCredit += amount;
-          summary.balancesByCurrency[currency] = (summary.balancesByCurrency[currency] || 0) + amount;
-        }
-      }
-    }
-    
-    // جلب بيانات الدائنين من جدول app_users
-    const creditors = [];
-    for (const [creditorUid, summary] of creditorMap.entries()) {
-      const userResult = await pool.query(
-        'SELECT user_id, full_name, phone_number, job_title FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL',
-        [creditorUid]
-      );
-      
-      const user = userResult.rows[0];
-      if (!user) continue;
-      
-      const netBalance = summary.totalCredit - summary.totalDebit;
-      const lastTransaction = summary.transactions[0]; // تم ترتيبها DESC
-      
-      creditors.push({
-        creditorName: user.full_name || 'مستخدم مجهول',
-        creditorPhone: user.phone_number || '',
-        creditorJobTitle: user.job_title || null,
-        creditorFirebaseUid: creditorUid,
-        totalDebit: summary.totalDebit,
-        totalCredit: summary.totalCredit,
-        netBalance: netBalance,
-        transactionCount: summary.transactions.length,
-        currency: lastTransaction.currency_code || 'IQD',
-        lastTransactionDate: lastTransaction.transaction_date ? 
-          Math.floor(new Date(lastTransaction.transaction_date).getTime()) : 
-          Date.now(),
-        balancesByCurrency: summary.balancesByCurrency
+
+    if (!ownerFirebaseUid) {
+      return res.status(400).json({
+        success: false,
+        error: 'currentUserFirebaseUid مطلوب'
       });
     }
-    
-    // ترتيب حسب تاريخ آخر معاملة
-    creditors.sort((a, b) => b.lastTransactionDate - a.lastTransactionDate);
-    
-    logger.debug('getDebtSummary: Returning creditors', {
+
+    const sql = `
+      WITH my_clients AS (
+        SELECT client_id
+        FROM business_clients
+        WHERE owner_firebase_uid = $1
+          AND deleted_at IS NULL
+      ),
+      tx AS (
+        SELECT
+          ft.owner_firebase_uid AS creditor_uid,
+          ft.transaction_amount,
+          COALESCE(ft.currency_code, 'IQD') AS currency_code,
+          ft.transaction_direction,
+          ft.transaction_date,
+          CASE
+            WHEN ft.transaction_direction IN ('expense','DEBIT','debit') THEN -ft.transaction_amount
+            ELSE ft.transaction_amount
+          END AS signed_amount
+        FROM financial_transactions ft
+        WHERE ft.client_id IN (SELECT client_id FROM my_clients)
+          AND ft.owner_firebase_uid IS NOT NULL
+          AND ft.owner_firebase_uid <> $1
+          AND ft.deleted_at IS NULL
+      ),
+      by_currency AS (
+        SELECT
+          creditor_uid,
+          jsonb_object_agg(currency_code, SUM(signed_amount)) AS balances_by_currency
+        FROM tx
+        GROUP BY creditor_uid
+      ),
+      by_creditor AS (
+        SELECT
+          creditor_uid,
+          COUNT(*) AS transaction_count,
+          MAX(transaction_date) AS last_transaction_date,
+          SUM(CASE WHEN transaction_direction IN ('expense','DEBIT','debit') THEN transaction_amount ELSE 0 END) AS total_debit,
+          SUM(CASE WHEN transaction_direction IN ('expense','DEBIT','debit') THEN 0 ELSE transaction_amount END) AS total_credit
+        FROM tx
+        GROUP BY creditor_uid
+      ),
+      last_currency AS (
+        SELECT DISTINCT ON (creditor_uid)
+          creditor_uid,
+          currency_code
+        FROM tx
+        ORDER BY creditor_uid, transaction_date DESC NULLS LAST
+      )
+      SELECT
+        au.full_name,
+        au.phone_number,
+        au.job_title,
+        bc.creditor_uid AS creditor_firebase_uid,
+        bc.transaction_count,
+        bc.last_transaction_date,
+        bc.total_debit,
+        bc.total_credit,
+        (bc.total_credit - bc.total_debit) AS net_balance,
+        COALESCE(cur.balances_by_currency, '{}'::jsonb) AS balances_by_currency,
+        COALESCE(lc.currency_code, 'IQD') AS currency
+      FROM by_creditor bc
+      JOIN app_users au
+        ON au.firebase_uid = bc.creditor_uid
+       AND au.deleted_at IS NULL
+      LEFT JOIN by_currency cur
+        ON cur.creditor_uid = bc.creditor_uid
+      LEFT JOIN last_currency lc
+        ON lc.creditor_uid = bc.creditor_uid
+      ORDER BY bc.last_transaction_date DESC NULLS LAST;
+    `;
+
+    const t0 = Date.now();
+    const result = await pool.query(sql, [ownerFirebaseUid]);
+    const totalMs = Date.now() - t0;
+
+    logger.debug('getDebtSummary: optimized query done', {
       ownerFirebaseUid,
-      creditorsCount: creditors.length,
-      creditorUids: creditors.map(c => c.creditorFirebaseUid)
+      rows: result.rows.length,
+      totalMs
     });
-    
+
+    const creditors = result.rows.map((row) => {
+      const totalDebit = row.total_debit !== null ? Number(row.total_debit) : 0;
+      const totalCredit = row.total_credit !== null ? Number(row.total_credit) : 0;
+      const netBalance = row.net_balance !== null ? Number(row.net_balance) : (totalCredit - totalDebit);
+
+      const lastDateMs = row.last_transaction_date
+        ? new Date(row.last_transaction_date).getTime()
+        : Date.now();
+
+      // jsonb يرجع كـ object غالباً في pg
+      const balancesByCurrency = row.balances_by_currency && typeof row.balances_by_currency === 'object'
+        ? row.balances_by_currency
+        : {};
+
+      return {
+        creditorName: row.full_name || 'مستخدم مجهول',
+        creditorPhone: row.phone_number || '',
+        creditorJobTitle: row.job_title || null,
+        creditorFirebaseUid: row.creditor_firebase_uid,
+        totalDebit,
+        totalCredit,
+        netBalance,
+        transactionCount: Number(row.transaction_count) || 0,
+        currency: row.currency || 'IQD',
+        lastTransactionDate: Math.floor(lastDateMs),
+        balancesByCurrency
+      };
+    });
+
     res.json({ success: true, data: creditors });
   } catch (error) {
     next(error);
@@ -845,4 +834,3 @@ module.exports = {
   deleteTransactionById,
   getDebtSummary
 };
-
