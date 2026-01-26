@@ -32,6 +32,10 @@ function parseFirebaseUidFromAuth(req) {
   return req.user?.firebase_uid || req.user?.firebaseUid || req.user?.uid || null;
 }
 
+// ----------------------------------------------------------------------------
+// Transactions
+// ----------------------------------------------------------------------------
+
 /**
  * GET /api/transactions
  * الحصول على المعاملات
@@ -673,21 +677,23 @@ async function deleteTransactionById(req, res, next) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// Debt Tracking (من سجّل عليّ؟)
+// ----------------------------------------------------------------------------
+
 /**
  * GET /api/transactions/debt-summary
  *
  * ✅ السيناريو المطلوب:
- * المستخدم الحالي (م2) يرى "من هم المستخدمون الذين سجّلوا قيوداً عليه/له"
+ * المستخدم الحالي يرى "من هم المستخدمون الذين سجّلوا قيوداً عليه/له"
  *
- * كيف نحدد "أنا" كمستهدف؟
- * - نأخذ رقم الهاتف للمستخدم الحالي من app_users (firebase_uid = myUid)
- * - ثم نبحث في business_clients عن العملاء الذين phone_number = رقمي
- * - ثم نجلب معاملات financial_transactions لهذه client_id
- * - ثم نجمع حسب owner_firebase_uid (المستخدم الذي سجّل القيد)
- *
- * Query params:
- *   - currentUserFirebaseUid (اختياري إذا auth موجود)
- *   - currentUserPhone (اختياري fallback)
+ * المنطق:
+ * - نحدد المستخدم الحالي (UID) من auth أو query
+ * - نجلب رقم هاتفه من app_users
+ * - نبحث عن كل client_id في business_clients حيث phone_number = رقم هاتفي
+ * - نجلب معاملات financial_transactions لهذه client_id
+ * - نجمع حسب owner_firebase_uid (المسجّل)
+ * - نستثني قيود المستخدم نفسه حتى لا يظهر لنفسه
  */
 async function getDebtSummary(req, res, next) {
   try {
@@ -700,7 +706,7 @@ async function getDebtSummary(req, res, next) {
     if (!myFirebaseUid && currentUserPhone) {
       const r = await pool.query(
         'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL LIMIT 1',
-        [currentUserPhone]
+        [String(currentUserPhone).trim()]
       );
       myFirebaseUid = r.rows?.[0]?.firebase_uid || null;
     }
@@ -721,55 +727,16 @@ async function getDebtSummary(req, res, next) {
       return res.json({ success: true, data: [] });
     }
 
-    // ✅ التحقق من وجود عملاء برقم الهاتف
-    const clientsCheck = await pool.query(
-      `SELECT 
-         COUNT(*) as total, 
-         COUNT(CASE WHEN owner_firebase_uid != $2 THEN 1 END) as excluding_owner,
-         COUNT(CASE WHEN owner_firebase_uid = $2 THEN 1 END) as owned_by_me,
-         array_agg(DISTINCT owner_firebase_uid) FILTER (WHERE owner_firebase_uid IS NOT NULL) as owner_uids
-       FROM business_clients 
-       WHERE phone_number = $1 AND deleted_at IS NULL`,
-      [myPhone, myFirebaseUid]
-    );
-    
-    const checkRow = clientsCheck.rows[0];
-    logger.debug('getDebtSummary: Clients check', {
-      myPhone,
-      myFirebaseUid,
-      totalClients: parseInt(checkRow?.total || 0),
-      excludingOwner: parseInt(checkRow?.excluding_owner || 0),
-      ownedByMe: parseInt(checkRow?.owned_by_me || 0),
-      ownerUids: checkRow?.owner_uids || []
-    });
-    
-    // ✅ التحقق من وجود معاملات
-    if (parseInt(checkRow?.excluding_owner || 0) > 0) {
-      const transactionsCheck = await pool.query(
-        `SELECT COUNT(*) as tx_count
-         FROM financial_transactions ft
-         JOIN business_clients bc ON ft.client_id = bc.client_id
-         WHERE bc.phone_number = $1
-           AND bc.deleted_at IS NULL
-           AND bc.owner_firebase_uid != $2
-           AND ft.deleted_at IS NULL
-           AND ft.owner_firebase_uid IS NOT NULL
-           AND ft.owner_firebase_uid != $2`,
-        [myPhone, myFirebaseUid]
-      );
-      
-      logger.debug('getDebtSummary: Transactions check', {
-        transactionCount: parseInt(transactionsCheck.rows[0]?.tx_count || 0)
-      });
-    }
+    // ✅ (اختياري) طباعة تشخيص سريع
+    logger.debug('getDebtSummary: identity resolved', { myFirebaseUid, myPhone });
 
+    // ✅ هذا هو الاستعلام الصحيح للسيناريو: "من سجّل عليّ؟"
     const sql = `
       WITH my_client_ids AS (
         SELECT bc.client_id
         FROM business_clients bc
         WHERE bc.phone_number = $1
           AND bc.deleted_at IS NULL
-          AND bc.owner_firebase_uid != $2
       ),
       tx AS (
         SELECT
@@ -786,7 +753,7 @@ async function getDebtSummary(req, res, next) {
         WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
           AND ft.deleted_at IS NULL
           AND ft.owner_firebase_uid IS NOT NULL
-          AND ft.owner_firebase_uid != $2
+          AND ft.owner_firebase_uid <> $2
       ),
       by_currency_base AS (
         SELECT recorder_uid, currency_code, SUM(signed_amount) AS balance
@@ -833,16 +800,11 @@ async function getDebtSummary(req, res, next) {
     const result = await pool.query(sql, [myPhone, myFirebaseUid]);
     const totalMs = Date.now() - t0;
 
-    logger.debug('getDebtSummary: summary-for-me done', {
+    logger.debug('getDebtSummary: done', {
       myFirebaseUid,
       myPhone,
       rows: result.rows.length,
-      totalMs,
-      sampleRow: result.rows.length > 0 ? {
-        recorder_uid: result.rows[0].recorder_firebase_uid,
-        full_name: result.rows[0].full_name,
-        transaction_count: result.rows[0].transaction_count
-      } : null
+      totalMs
     });
 
     const users = result.rows.map((row) => {
@@ -859,11 +821,10 @@ async function getDebtSummary(req, res, next) {
           ? row.balances_by_currency
           : {};
 
-      // تحديد العملة الأساسية (الأكثر استخداماً أو الأكبر رصيداً)
+      // العملة الأساسية (للعرض) = أكبر رصيد مطلق
       const primaryCurrency = Object.keys(balancesByCurrency).length > 0
-        ? Object.entries(balancesByCurrency)
-            .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][0]
-        : 'YER';
+        ? Object.entries(balancesByCurrency).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][0]
+        : 'IQD';
 
       return {
         creditorName: row.full_name || 'مستخدم مجهول',
@@ -890,13 +851,7 @@ async function getDebtSummary(req, res, next) {
  * GET /api/transactions/debt-details/:creditorFirebaseUid
  *
  * ✅ عند النقر على مستخدم من شاشة المتابعة:
- * نعرض كل القيود التي سجّلها هذا المستخدم (الدائن) عليّ (أنا المستخدم الحالي)
- *
- * Params:
- *   - creditorFirebaseUid (المستخدم الذي سجّل القيود - الدائن)
- * Query:
- *   - currentUserFirebaseUid (اختياري إذا auth موجود)
- *   - currentUserPhone (اختياري fallback)
+ * نعرض كل القيود التي سجّلها هذا المستخدم عليّ (أنا = رقم هاتفي)
  */
 async function getDebtDetails(req, res, next) {
   try {
@@ -913,7 +868,7 @@ async function getDebtDetails(req, res, next) {
     if (!myFirebaseUid && currentUserPhone) {
       const r = await pool.query(
         'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL LIMIT 1',
-        [currentUserPhone]
+        [String(currentUserPhone).trim()]
       );
       myFirebaseUid = r.rows?.[0]?.firebase_uid || null;
     }
@@ -938,21 +893,23 @@ async function getDebtDetails(req, res, next) {
         FROM business_clients bc
         WHERE bc.phone_number = $1
           AND bc.deleted_at IS NULL
-          AND bc.owner_firebase_uid != $3
       )
-      SELECT 
+      SELECT
         ft.*,
-        ca.account_name,
-        ca.account_id
+        ca.account_name
       FROM financial_transactions ft
-      LEFT JOIN cash_accounts ca ON ft.account_id = ca.account_id AND ca.deleted_at IS NULL
+      LEFT JOIN cash_accounts ca
+        ON ft.account_id = ca.account_id
+       AND ca.deleted_at IS NULL
       WHERE ft.client_id IN (SELECT client_id FROM my_client_ids)
         AND ft.owner_firebase_uid = $2
         AND ft.deleted_at IS NULL
       ORDER BY ft.transaction_date DESC, ft.updated_at DESC, ft.created_at DESC
     `;
 
-    const params = [myPhone, creditorFirebaseUid, myFirebaseUid];
+    const params = [myPhone, creditorFirebaseUid];
+
+    // ⚠️ مهم: أول باراميتر إضافي يبدأ من $3
     let idx = 3;
 
     if (limit) {
@@ -981,6 +938,6 @@ module.exports = {
   syncTransaction,
   deleteTransactionByUuid,
   deleteTransactionById,
-  getDebtSummary,   // ✅ ملخص "من سجّل عليّ"
-  getDebtDetails    // ✅ تفاصيل القيود عند الضغط
+  getDebtSummary, // ✅ ملخص "من سجّل عليّ"
+  getDebtDetails  // ✅ تفاصيل القيود عند الضغط
 };
