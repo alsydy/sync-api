@@ -14,15 +14,34 @@ function monitoringMiddleware(req, res, next) {
   const startTime = Date.now();
   const method = req.method;
   const path = req.path;
-  
-  // تسجيل وقت الانتهاء
+
   res.on('finish', () => {
     const duration = Date.now() - startTime;
     const statusCode = res.statusCode;
-    
-    // تسجيل الطلب
-    recordRequest(method, path, statusCode, duration);
-    
+
+    // ✅ لا نجعل المراقبة تؤثر على الأداء أو تسبب أخطاء غير معالجة
+    try {
+      // نفذها بشكل غير حاجب (حتى لو كانت async)
+      Promise.resolve(recordRequest(method, path, statusCode, duration))
+        .catch((err) => {
+          logger.warning('Monitoring recordRequest failed', {
+            error: err?.message || String(err),
+            method,
+            path,
+            statusCode,
+            requestId: req.id
+          });
+        });
+    } catch (err) {
+      logger.warning('Monitoring recordRequest threw error', {
+        error: err?.message || String(err),
+        method,
+        path,
+        statusCode,
+        requestId: req.id
+      });
+    }
+
     // تسجيل الطلبات البطيئة في السجلات
     if (duration > 1000) {
       logger.warning('Slow request detected', {
@@ -33,7 +52,7 @@ function monitoringMiddleware(req, res, next) {
         requestId: req.id
       });
     }
-    
+
     // تسجيل الأخطاء في السجلات
     if (statusCode >= 500) {
       logger.error('Server error', {
@@ -45,11 +64,10 @@ function monitoringMiddleware(req, res, next) {
       });
     }
   });
-  
+
   next();
 }
 
 module.exports = {
   monitoringMiddleware
 };
-
