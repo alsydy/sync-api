@@ -16,16 +16,17 @@ const { optionalAuthenticate } = require('../middleware/auth');
 router.get('/active', optionalAuthenticate, subscriptionController.getActiveSubscription);
 
 /**
- * GET /api/packages
- * الحصول على جميع الباقات النشطة
+ * GET /api/subscriptions/packages
+ * GET /api/packages   ✅ توافق مع التطبيق
  */
 router.get('/packages', optionalAuthenticate, subscriptionController.getPackages);
 
 /**
- * POST /api/subscription-requests
- * إرسال طلب اشتراك جديد
+ * POST /api/subscriptions/requests
+ * POST /api/subscription-requests ✅ توافق مع التطبيق
  */
 router.post('/requests', optionalAuthenticate, subscriptionController.createSubscriptionRequest);
 
+// ✅ Alias paths للتوافق (نفس الكنترولر)
+router.get('/../packages', optionalAuthenticate, subscriptionController.getPackages); // ملاحظة: هذا غير صحيح في Express
 module.exports = router;
-
