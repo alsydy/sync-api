@@ -51,8 +51,11 @@ router.post('/', optionalAuthenticate, transactionController.createTransaction);
 /**
  * PUT /api/transactions/sync
  * مزامنة معاملة (Insert or Update حسب UUID)
+ *
+ * ✅ FIX مهم: optionalAuthenticate يجب أن يأتي قبل syncLimiter
+ * لكي يصبح rate-limit "حسب المستخدم" عندما يوجد token
  */
-router.put('/sync', syncLimiter, optionalAuthenticate, transactionController.syncTransaction);
+router.put('/sync', optionalAuthenticate, syncLimiter, transactionController.syncTransaction);
 
 /**
  * DELETE /api/transactions/by-uuid/:transactionUuid
