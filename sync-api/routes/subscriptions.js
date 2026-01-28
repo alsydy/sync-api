@@ -30,3 +30,4 @@ router.post('/requests', optionalAuthenticate, subscriptionController.createSubs
 // ✅ Alias paths للتوافق (نفس الكنترولر)
 router.get('/../packages', optionalAuthenticate, subscriptionController.getPackages); // ملاحظة: هذا غير صحيح في Express
 module.exports = router;
+
