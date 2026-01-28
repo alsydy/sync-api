@@ -63,6 +63,7 @@ const {
 // Import services
 const { resolveConflict } = require('./services/conflictResolver');
 const { logAudit } = require('./services/auditService');
+const subscriptionController = require('./controllers/subscriptionController');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -165,6 +166,10 @@ app.use('/api/clients', clientRoutes);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/transactions', transactionRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
+// ✅ Compatibility routes (بدون تعديل التطبيق)
+app.get('/api/packages', optionalAuthenticate, subscriptionController.getPackages);
+app.post('/api/subscription-requests', optionalAuthenticate, subscriptionController.createSubscriptionRequest);
+
 app.use('/api/fcm-tokens', fcmTokenRoutes);
 app.use('/api/settings', settingsRoutes);
 
