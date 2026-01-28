@@ -16,31 +16,6 @@ if (process.env.NODE_ENV === 'production' && JWT_SECRET === 'your-secret-key-cha
 }
 
 // ============================================================================
-// Rate Limiting
-// ============================================================================
-
-const generalLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: 'تم تجاوز الحد المسموح من الطلبات. يرجى المحاولة لاحقاً.',
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5,
-  message: 'تم تجاوز عدد محاولات تسجيل الدخول. يرجى المحاولة لاحقاً.',
-  skipSuccessfulRequests: true,
-});
-
-const syncLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  message: 'تم تجاوز حد طلبات المزامنة. يرجى الانتظار قليلاً.',
-});
-
-// ============================================================================
 // JWT Token Functions
 // ============================================================================
 
@@ -130,6 +105,87 @@ async function optionalAuthenticate(req, res, next) {
 }
 
 // ============================================================================
+// Rate Limiting (محسن)
+// ============================================================================
+
+/**
+ * مفتاح الـ Rate Limit:
+ * - لو المستخدم معروف (req.user) نستخدم firebaseUid/userId لاحتساب الحد لكل مستخدم
+ * - وإلا نستخدم IP كحل احتياطي
+ */
+function rateLimitKey(req) {
+  const u = req.user || null;
+
+  if (u) {
+    return (
+      u.firebaseUid ||
+      u.firebase_uid ||
+      u.uid ||
+      u.userId ||
+      u.user_id ||
+      `user:${u.id || 'unknown'}`
+    );
+  }
+
+  return req.ip;
+}
+
+/**
+ * Limiter عام:
+ * - رفعنا الحد لتقليل 429
+ * - استثنينا health/info حتى تقدر تعمل ping بدون مشاكل
+ * - keyGenerator: حسب المستخدم إذا موجود
+ */
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 500, // كان 100
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => rateLimitKey(req),
+  skip: (req) => req.path === '/api/health' || req.path === '/api/info',
+  message: {
+    success: false,
+    error: 'تم تجاوز الحد المسموح من الطلبات. يرجى المحاولة لاحقاً.'
+  }
+});
+
+/**
+ * Limiter تسجيل الدخول:
+ * - أبقيناه 5/15min
+ * - keyGenerator لتخفيف مشكلة IP المشترك
+ * - skipSuccessfulRequests كما عندك
+ */
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => rateLimitKey(req),
+  message: {
+    success: false,
+    error: 'تم تجاوز عدد محاولات تسجيل الدخول. يرجى المحاولة لاحقاً.'
+  },
+  skipSuccessfulRequests: true,
+});
+
+/**
+ * Limiter المزامنة:
+ * - رفعناه لأن 10/دقيقة قليل جداً لمزامنة حقيقية
+ * - keyGenerator: حسب المستخدم إذا optionalAuthenticate قبل هذا limiter
+ */
+const syncLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60, // كان 10
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => rateLimitKey(req),
+  message: {
+    success: false,
+    error: 'تم تجاوز حد طلبات المزامنة. يرجى الانتظار قليلاً.'
+  }
+});
+
+// ============================================================================
 // Authorization Middleware
 // ============================================================================
 
@@ -147,7 +203,7 @@ async function authorizeResource(req, res, next) {
     return res.status(403).json({
       success: false,
       error: 'ليس لديك صلاحية للوصول لهذا المورد'
-    });
+      });
   }
 }
 
