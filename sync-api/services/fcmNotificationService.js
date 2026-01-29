@@ -183,8 +183,87 @@ async function sendTransactionNotification(transaction, customer, owner) {
   }
 }
 
+/**
+ * إرسال إشعار إلى مستخدم حسب firebaseUid (للاستدعاء من التطبيق عبر POST /api/notifications/send)
+ * @param {String} firebaseUid - معرف Firebase للمستلم
+ * @param {String} title - عنوان الإشعار
+ * @param {String} body - نص الإشعار
+ * @param {String} type - نوع الإشعار (مثل 'transaction')
+ * @param {Object} data - بيانات إضافية (تُحوَّل إلى strings لـ FCM)
+ */
+async function sendNotificationToUser(firebaseUid, title, body, type = 'transaction', data = {}) {
+  try {
+    if (!isInitialized) {
+      logger.warning('Firebase Admin SDK not initialized - skipping sendNotificationToUser');
+      return { success: false, error: 'firebase_not_initialized' };
+    }
+    if (!firebaseUid || !title || !body) {
+      return { success: false, error: 'firebaseUid, title and body are required' };
+    }
+
+    const tokensResult = await pool.query(
+      `SELECT token FROM user_fcm_tokens
+       WHERE firebase_uid = $1 AND is_active = TRUE
+       ORDER BY is_primary DESC, last_used_at DESC
+       LIMIT 10`,
+      [firebaseUid]
+    );
+
+    if (tokensResult.rows.length === 0) {
+      logger.warning('No FCM tokens found for firebaseUid in sendNotificationToUser', { firebaseUid });
+      return { success: false, error: 'no_fcm_tokens', message: 'لا توجد أجهزة مسجلة لهذا المستخدم' };
+    }
+
+    const tokens = tokensResult.rows.map(row => row.token);
+    const dataStrings = {};
+    if (data && typeof data === 'object') {
+      for (const [k, v] of Object.entries(data)) {
+        dataStrings[k] = String(v ?? '');
+      }
+    }
+    dataStrings.type = type || 'transaction';
+
+    const message = {
+      notification: { title, body },
+      data: dataStrings,
+      tokens,
+      android: { priority: 'high' },
+      apns: { headers: { 'apns-priority': '10' } }
+    };
+
+    const response = await admin.messaging().sendEachForMulticast(message);
+    logger.info('Notification sent via sendNotificationToUser', {
+      firebaseUid,
+      tokensCount: tokens.length,
+      successCount: response.successCount,
+      failureCount: response.failureCount
+    });
+    if (response.failureCount > 0) {
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          logger.warning('FCM send failed for token index', { idx, error: resp.error?.message });
+        }
+      });
+    }
+
+    return {
+      success: response.successCount > 0,
+      successCount: response.successCount,
+      failureCount: response.failureCount
+    };
+  } catch (error) {
+    logger.error('Error in sendNotificationToUser', {
+      error: error.message,
+      stack: error.stack,
+      firebaseUid
+    });
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   sendTransactionNotification,
+  sendNotificationToUser,
   initializeFirebase
 };
 
