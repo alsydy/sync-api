@@ -26,11 +26,18 @@ async function sendNotification(req, res, next) {
     const result = await sendNotificationToUser(firebaseUid, title, body, type, data);
 
     if (!result.success) {
-      const status = result.error === 'no_fcm_tokens' ? 404 : 500;
+      let status = 500;
+      if (result.error === 'no_fcm_tokens') status = 404;
+      else if (result.error === 'firebase_not_initialized') status = 503;
+      const message = result.error === 'no_fcm_tokens'
+        ? 'لا توجد أجهزة مسجلة لهذا المستخدم'
+        : result.error === 'firebase_not_initialized'
+          ? 'خدمة الإشعارات غير مهيأة على الخادم — يرجى إعداد FIREBASE_SERVICE_ACCOUNT'
+          : (result.message || result.error);
       return res.status(status).json({
         success: false,
         error: result.error,
-        message: result.message || (result.error === 'no_fcm_tokens' ? 'لا توجد أجهزة مسجلة لهذا المستخدم' : result.error)
+        message
       });
     }
 
