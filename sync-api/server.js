@@ -76,6 +76,7 @@ const transactionRoutes = require('./routes/transactions');
 const subscriptionRoutes = require('./routes/subscriptions');
 const fcmTokenRoutes = require('./routes/fcm-tokens');
 const settingsRoutes = require('./routes/settings');
+const notificationRoutes = require('./routes/notifications');
 
 // ==================== 1. تهيئة Express Server ====================
 const app = express();
@@ -172,6 +173,7 @@ app.post('/api/subscription-requests', optionalAuthenticate, subscriptionControl
 
 app.use('/api/fcm-tokens', fcmTokenRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // ==================== 4. دوال مساعدة (Legacy - للتوافق) ====================
 // (كما هي)
