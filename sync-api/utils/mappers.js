@@ -132,7 +132,17 @@ function mapTransactionToAPI(row) {
     syncVersion: row.sync_version,
     createdAt: secondsToMs(row.created_at),
     updatedAt: secondsToMs(row.updated_at),
-    deletedAt: row.deleted_at ? secondsToMs(row.deleted_at) : null
+    deletedAt: row.deleted_at ? secondsToMs(row.deleted_at) : null,
+    // الحوالات المالية
+    entryType: row.entry_type || null,
+    transferCompany: row.transfer_company || null,
+    transferRecipient: row.transfer_recipient || null,
+    transferSender: row.transfer_sender || null,
+    transferNumber: row.transfer_number || null,
+    feeAmount: row.fee_amount != null ? parseFloat(row.fee_amount) : null,
+    feeCurrency: row.fee_currency || null,
+    centerFeeAmount: row.center_fee_amount != null ? parseFloat(row.center_fee_amount) : null,
+    centerFeeCurrency: row.center_fee_currency || null
   };
 }
 
