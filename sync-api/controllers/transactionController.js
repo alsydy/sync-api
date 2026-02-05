@@ -185,8 +185,11 @@ async function createTransaction(req, res, next) {
         client_id, account_id, client_firestore_id, account_firestore_id,
         transaction_amount, currency_code, transaction_direction, transaction_note, transaction_date,
         notify_customer, is_synced, device_id, transaction_number, sync_version,
-        created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP)
+        created_at, updated_at,
+        entry_type, transfer_company, transfer_recipient, transfer_sender, transfer_number,
+        fee_amount, fee_currency, center_fee_amount, center_fee_currency
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP,
+        $21, $22, $23, $24, $25, $26, $27, $28, $29)
       RETURNING *`,
       [
         (transactionData.transactionUuid && isValidUUID(transactionData.transactionUuid))
@@ -210,7 +213,16 @@ async function createTransaction(req, res, next) {
         transactionData.deviceId || null,
         transactionData.transactionNumber || null,
         transactionData.syncVersion || 1,
-        msToSeconds(transactionData.createdAt || Date.now())
+        msToSeconds(transactionData.createdAt || Date.now()),
+        transactionData.entryType || null,
+        transactionData.transferCompany || null,
+        transactionData.transferRecipient || null,
+        transactionData.transferSender || null,
+        transactionData.transferNumber || null,
+        transactionData.feeAmount != null ? transactionData.feeAmount : null,
+        transactionData.feeCurrency || null,
+        transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
+        transactionData.centerFeeCurrency || null
       ]
     );
 
@@ -325,7 +337,16 @@ async function syncTransaction(req, res, next) {
           device_id = COALESCE($17, device_id),
           transaction_number = COALESCE($18, transaction_number),
           sync_version = COALESCE($19, sync_version) + 1,
-          updated_at = CURRENT_TIMESTAMP
+          updated_at = CURRENT_TIMESTAMP,
+          entry_type = COALESCE($20, entry_type),
+          transfer_company = COALESCE($21, transfer_company),
+          transfer_recipient = COALESCE($22, transfer_recipient),
+          transfer_sender = COALESCE($23, transfer_sender),
+          transfer_number = COALESCE($24, transfer_number),
+          fee_amount = COALESCE($25, fee_amount),
+          fee_currency = COALESCE($26, fee_currency),
+          center_fee_amount = COALESCE($27, center_fee_amount),
+          center_fee_currency = COALESCE($28, center_fee_currency)
         WHERE transaction_uuid = $1 AND deleted_at IS NULL
         RETURNING *`,
         [
@@ -347,7 +368,16 @@ async function syncTransaction(req, res, next) {
           intToBoolean(transactionData.synced),
           transactionData.deviceId,
           transactionData.transactionNumber,
-          transactionData.syncVersion || existingTransaction.sync_version || 0
+          transactionData.syncVersion || existingTransaction.sync_version || 0,
+          transactionData.entryType ?? null,
+          transactionData.transferCompany ?? null,
+          transactionData.transferRecipient ?? null,
+          transactionData.transferSender ?? null,
+          transactionData.transferNumber ?? null,
+          transactionData.feeAmount != null ? transactionData.feeAmount : null,
+          transactionData.feeCurrency ?? null,
+          transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
+          transactionData.centerFeeCurrency ?? null
         ]
       );
 
@@ -487,8 +517,11 @@ async function syncTransaction(req, res, next) {
           client_id, account_id, client_firestore_id, account_firestore_id,
           transaction_amount, currency_code, transaction_direction, transaction_note, transaction_date,
           notify_customer, is_synced, device_id, transaction_number, sync_version,
-          created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP)
+          created_at, updated_at,
+          entry_type, transfer_company, transfer_recipient, transfer_sender, transfer_number,
+          fee_amount, fee_currency, center_fee_amount, center_fee_currency
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP,
+          $21, $22, $23, $24, $25, $26, $27, $28, $29)
         RETURNING *`,
         [
           uuid,
@@ -510,7 +543,16 @@ async function syncTransaction(req, res, next) {
           transactionData.deviceId || null,
           transactionData.transactionNumber || null,
           transactionData.syncVersion || 1,
-          msToSeconds(transactionData.createdAt || Date.now())
+          msToSeconds(transactionData.createdAt || Date.now()),
+          transactionData.entryType || null,
+          transactionData.transferCompany || null,
+          transactionData.transferRecipient || null,
+          transactionData.transferSender || null,
+          transactionData.transferNumber || null,
+          transactionData.feeAmount != null ? transactionData.feeAmount : null,
+          transactionData.feeCurrency || null,
+          transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
+          transactionData.centerFeeCurrency || null
         ]
       );
 
