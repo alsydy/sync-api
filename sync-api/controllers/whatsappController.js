@@ -141,10 +141,25 @@ async function setClientOptOut(req, res, next) {
 async function getClientOptOuts(req, res, next) {
   try {
     const userId = requireInt(req.params.userId, 'userId');
-    const r = await pool.query(
-      'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1 AND opted_out = TRUE',
-      [userId]
-    );
+    let r;
+    try {
+      // الشكل المتوقع
+      r = await pool.query(
+        'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1 AND opted_out = TRUE',
+        [userId]
+      );
+    } catch (e1) {
+      // ✅ لا نكسر التطبيق إذا اختلف اسم العمود في DB
+      try {
+        r = await pool.query(
+          'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1 AND is_opted_out = TRUE',
+          [userId]
+        );
+      } catch (e2) {
+        logger.warning('Failed to read whatsapp_client_opt_out (schema mismatch?)', { userId, error: e2?.message });
+        return res.json({ success: true, data: [] });
+      }
+    }
     const ids = (r.rows || []).map((x) => Number(x.client_id)).filter((x) => Number.isFinite(x));
     res.json({ success: true, data: ids });
   } catch (error) {
@@ -171,28 +186,50 @@ async function createPrivateSessionRequest(req, res, next) {
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = sha256Hex(token);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
-
-    await pool.query(
-      `
-      INSERT INTO whatsapp_session_requests (
-        request_id,
-        user_id,
-        token_hash,
-        status,
-        expires_at,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, 'pending', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `,
-      [requestId, userId, tokenHash, expiresAt]
-    );
+    // ✅ IMPORTANT: في DB لديك request_id قد يكون BIGINT (Auto Increment)
+    // لذلك لا نمرّر UUID. ندع DB يولد request_id ثم نعيده إن لزم.
+    let insertedRequestId = null;
+    try {
+      const ins = await pool.query(
+        `
+        INSERT INTO whatsapp_session_requests (
+          user_id,
+          token_hash,
+          status,
+          expires_at,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, 'pending', $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING request_id
+        `,
+        [userId, tokenHash, expiresAt]
+      );
+      insertedRequestId = ins.rows?.[0]?.request_id ?? null;
+    } catch (e) {
+      // fallback: بعض المخططات قد تكون request_id نصي (نادر) — حاول بالـUUID فقط إذا فشل الإدراج بدون request_id
+      const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+      const ins2 = await pool.query(
+        `
+        INSERT INTO whatsapp_session_requests (
+          request_id,
+          user_id,
+          token_hash,
+          status,
+          expires_at,
+          created_at,
+          updated_at
+        ) VALUES ($1, $2, $3, 'pending', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        RETURNING request_id
+        `,
+        [requestId, userId, tokenHash, expiresAt]
+      );
+      insertedRequestId = ins2.rows?.[0]?.request_id ?? null;
+    }
 
     const base = (process.env.WHATSAPP_API_BASE_URL || '').replace(/\/+$/, '');
     const sessionUrl = `${base || 'https://whatsapp-api'}/session/${token}`;
 
-    res.json({ success: true, data: { session_url: sessionUrl } });
+    res.json({ success: true, data: { session_url: sessionUrl, request_id: insertedRequestId } });
   } catch (error) {
     next(error);
   }
