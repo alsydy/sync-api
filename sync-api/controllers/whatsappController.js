@@ -229,6 +229,12 @@ async function createPrivateSessionRequest(req, res, next) {
     const base = (process.env.WHATSAPP_API_BASE_URL || '').replace(/\/+$/, '');
     const sessionUrl = `${base || 'https://whatsapp-api'}/session/${token}`;
 
+    logger.info('WhatsApp private session request created', {
+      userId,
+      requestId: insertedRequestId,
+      expiresAt: expiresAt.toISOString()
+    });
+
     res.json({ success: true, data: { session_url: sessionUrl, request_id: insertedRequestId } });
   } catch (error) {
     next(error);
