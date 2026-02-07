@@ -22,6 +22,7 @@ const { mapTransactionToAPI } = require('../utils/mappers');
 const { logAudit } = require('../services/auditService');
 const { resolveConflict } = require('../services/conflictResolver');
 const { sendTransactionNotification } = require('../services/fcmNotificationService');
+const { enqueueWhatsAppOutboxForTransaction } = require('../services/whatsappOutboxService');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 
@@ -238,6 +239,25 @@ async function createTransaction(req, res, next) {
       transaction,
       req
     );
+
+    // ✅ WhatsApp Outbox (غير متزامن - لا يؤثر على زمن الاستجابة)
+    setImmediate(() => {
+      enqueueWhatsAppOutboxForTransaction(transaction)
+        .then((r) => {
+          if (r?.enqueued) {
+            logger.info('WhatsApp outbox enqueued', {
+              transactionUuid: transaction.transaction_uuid,
+              outboxId: r.outboxId
+            });
+          }
+        })
+        .catch((e) => {
+          logger.warning('WhatsApp outbox enqueue failed', {
+            transactionUuid: transaction.transaction_uuid,
+            error: e?.message
+          });
+        });
+    });
 
     res.status(201).json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
@@ -568,6 +588,25 @@ async function syncTransaction(req, res, next) {
         transaction,
         req
       );
+
+      // ✅ WhatsApp Outbox (غير متزامن)
+      setImmediate(() => {
+        enqueueWhatsAppOutboxForTransaction(transaction)
+          .then((r) => {
+            if (r?.enqueued) {
+              logger.info('WhatsApp outbox enqueued', {
+                transactionUuid: transaction.transaction_uuid,
+                outboxId: r.outboxId
+              });
+            }
+          })
+          .catch((e) => {
+            logger.warning('WhatsApp outbox enqueue failed', {
+              transactionUuid: transaction.transaction_uuid,
+              error: e?.message
+            });
+          });
+      });
 
       if (transaction.notify_customer) {
         setImmediate(async () => {
