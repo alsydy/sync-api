@@ -186,6 +186,7 @@ async function createPrivateSessionRequest(req, res, next) {
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = sha256Hex(token);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const sessionId = `user_${userId}`; // DB: session_id NOT NULL
     // ✅ IMPORTANT: في DB لديك request_id قد يكون BIGINT (Auto Increment)
     // لذلك لا نمرّر UUID. ندع DB يولد request_id ثم نعيده إن لزم.
     let insertedRequestId = null;
@@ -194,15 +195,17 @@ async function createPrivateSessionRequest(req, res, next) {
         `
         INSERT INTO whatsapp_session_requests (
           user_id,
+          session_id,
+          token,
           token_hash,
           status,
           expires_at,
           created_at,
           updated_at
-        ) VALUES ($1, $2, 'pending', $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, 'pending', $5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING request_id
         `,
-        [userId, tokenHash, expiresAt]
+        [userId, sessionId, token, tokenHash, expiresAt]
       );
       insertedRequestId = ins.rows?.[0]?.request_id ?? null;
     } catch (e) {
@@ -213,15 +216,17 @@ async function createPrivateSessionRequest(req, res, next) {
         INSERT INTO whatsapp_session_requests (
           request_id,
           user_id,
+          session_id,
+          token,
           token_hash,
           status,
           expires_at,
           created_at,
           updated_at
-        ) VALUES ($1, $2, $3, 'pending', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
         RETURNING request_id
         `,
-        [requestId, userId, tokenHash, expiresAt]
+        [requestId, userId, sessionId, token, tokenHash, expiresAt]
       );
       insertedRequestId = ins2.rows?.[0]?.request_id ?? null;
     }
@@ -232,6 +237,7 @@ async function createPrivateSessionRequest(req, res, next) {
     logger.info('WhatsApp private session request created', {
       userId,
       requestId: insertedRequestId,
+      sessionId,
       expiresAt: expiresAt.toISOString()
     });
 
