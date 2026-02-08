@@ -231,8 +231,17 @@ async function createPrivateSessionRequest(req, res, next) {
       insertedRequestId = ins2.rows?.[0]?.request_id ?? null;
     }
 
-    const base = (process.env.WHATSAPP_API_BASE_URL || '').replace(/\/+$/, '');
-    const sessionUrl = `${base || 'https://whatsapp-api'}/session/${token}`;
+    const baseRaw = (process.env.WHATSAPP_API_BASE_URL || '').trim();
+    const base = baseRaw.replace(/\/+$/, '');
+    if (!base) {
+      // لا نرجّع رابط خاطئ. هذا يؤدي لضياع وقت على العميل.
+      logger.errorMsg('WHATSAPP_API_BASE_URL is not configured', { userId, requestId: insertedRequestId });
+      return res.status(500).json({
+        success: false,
+        error: 'WHATSAPP_API_BASE_URL is not configured on sync-api'
+      });
+    }
+    const sessionUrl = `${base}/session/${token}`;
 
     logger.info('WhatsApp private session request created', {
       userId,
