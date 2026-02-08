@@ -110,7 +110,12 @@ app.use((req, res, next) => {
 
 // CORS
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
+  origin: (() => {
+    const raw = process.env.ALLOWED_ORIGINS;
+    if (!raw) return '*';
+    const list = raw.split(',').map((s) => s.trim()).filter(Boolean);
+    return list.length > 0 ? list : '*';
+  })(),
   credentials: true
 }));
 
@@ -144,7 +149,12 @@ app.use(monitoringMiddleware);
 
 // Timeout handler
 app.use((req, res, next) => {
-  if (!req.timedout) next();
+  if (!req.timedout) return next();
+  if (res.headersSent) return;
+  res.status(503).json({
+    success: false,
+    error: 'Request timeout'
+  });
 });
 
 // ==================== 3. Routes ====================
