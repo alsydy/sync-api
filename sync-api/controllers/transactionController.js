@@ -33,29 +33,6 @@ function parseFirebaseUidFromAuth(req) {
   return req.user?.firebase_uid || req.user?.firebaseUid || req.user?.uid || null;
 }
 
-async function computeNotifyCustomer(ownerUserId, clientId) {
-  // Server-driven notifications: depend only on user settings + client opt-out.
-  if (!ownerUserId || !clientId) return false;
-  try {
-    const [s, o] = await Promise.all([
-      pool.query(
-        'SELECT enable_whatsapp FROM whatsapp_user_settings WHERE user_id = $1 LIMIT 1',
-        [ownerUserId]
-      ),
-      pool.query(
-        'SELECT 1 FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
-        [ownerUserId, clientId]
-      )
-    ]);
-    const enabled = s.rows.length > 0 && s.rows[0].enable_whatsapp === true;
-    const optedOut = o.rows.length > 0;
-    return enabled && !optedOut;
-  } catch (e) {
-    logger.warning('computeNotifyCustomer failed', { ownerUserId, clientId, error: e?.message });
-    return false;
-  }
-}
-
 // ----------------------------------------------------------------------------
 // Transactions
 // ----------------------------------------------------------------------------
@@ -202,17 +179,6 @@ async function createTransaction(req, res, next) {
 
     // الحصول على ownerUserId الصحيح
     const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-    const clientId = await normalizeClientId(
-      transactionData.customerId || transactionData.clientId,
-      transactionData.customerFirestoreId || transactionData.clientFirestoreId
-    );
-    if (!clientId) {
-      return res.status(400).json({
-        success: false,
-        error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
-      });
-    }
-    const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
     const result = await pool.query(
       `INSERT INTO financial_transactions (
@@ -234,7 +200,7 @@ async function createTransaction(req, res, next) {
         transactionData.firestoreId || null,
         ownerUserId,
         transactionData.ownerFirebaseUid || null,
-        clientId,
+        transactionData.customerId || transactionData.clientId,
         transactionData.accountId,
         transactionData.customerFirestoreId || transactionData.clientFirestoreId || null,
         transactionData.accountFirestoreId || null,
@@ -243,7 +209,7 @@ async function createTransaction(req, res, next) {
         transactionData.direction || transactionData.transactionDirection,
         transactionData.note || transactionData.transactionNote || null,
         msToSeconds(transactionData.transactionDate || Date.now()),
-        intToBoolean(notifyCustomerServer),
+        intToBoolean(transactionData.notifyCustomer !== undefined ? transactionData.notifyCustomer : 0),
         intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
         transactionData.deviceId || null,
         transactionData.transactionNumber || null,
@@ -370,8 +336,6 @@ async function syncTransaction(req, res, next) {
         });
       }
 
-      const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
-
       // تحديث المعاملة الموجودة
       const result = await pool.query(
         `UPDATE financial_transactions SET
@@ -388,7 +352,7 @@ async function syncTransaction(req, res, next) {
           transaction_direction = $12,
           transaction_note = COALESCE($13, transaction_note),
           transaction_date = to_timestamp($14),
-          notify_customer = $15,
+          notify_customer = COALESCE($15, notify_customer),
           is_synced = COALESCE($16, is_synced),
           device_id = COALESCE($17, device_id),
           transaction_number = COALESCE($18, transaction_number),
@@ -420,7 +384,7 @@ async function syncTransaction(req, res, next) {
           normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
           transactionData.note || transactionData.transactionNote,
           msToSeconds(transactionData.transactionDate),
-          intToBoolean(notifyCustomerServer),
+          intToBoolean(transactionData.notifyCustomer),
           intToBoolean(transactionData.synced),
           transactionData.deviceId,
           transactionData.transactionNumber,
@@ -449,25 +413,6 @@ async function syncTransaction(req, res, next) {
         transaction,
         req
       );
-
-      // ✅ WhatsApp Outbox (غير متزامن - لا يؤثر على زمن الاستجابة)
-      setImmediate(() => {
-        enqueueWhatsAppOutboxForTransaction(transaction)
-          .then((r) => {
-            if (r?.enqueued) {
-              logger.info('WhatsApp outbox enqueued', {
-                transactionUuid: transaction.transaction_uuid,
-                outboxId: r.outboxId
-              });
-            }
-          })
-          .catch((e) => {
-            logger.warning('WhatsApp outbox enqueue failed', {
-              transactionUuid: transaction.transaction_uuid,
-              error: e?.message
-            });
-          });
-      });
 
       // ✅ إرسال إشعار FCM إذا كان notify_customer = true
       if (transaction.notify_customer) {
@@ -586,8 +531,6 @@ async function syncTransaction(req, res, next) {
         });
       }
 
-      const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
-
       const result = await pool.query(
         `INSERT INTO financial_transactions (
           transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
@@ -603,23 +546,23 @@ async function syncTransaction(req, res, next) {
         [
           uuid,
           transactionData.cloudId || null,
-        transactionData.firestoreId || null,
-        ownerUserId,
-        transactionData.ownerFirebaseUid || null,
-        clientId,
-        accountId,
-        transactionData.customerFirestoreId || transactionData.clientFirestoreId || null,
-        transactionData.accountFirestoreId || null,
-        transactionData.amount || transactionData.transactionAmount,
-        transactionData.currency || transactionData.currencyCode || 'IQD',
-        normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
-        transactionData.note || transactionData.transactionNote || null,
-        msToSeconds(transactionData.transactionDate || Date.now()),
-        intToBoolean(notifyCustomerServer),
-        intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
-        transactionData.deviceId || null,
-        transactionData.transactionNumber || null,
-        transactionData.syncVersion || 1,
+          transactionData.firestoreId || null,
+          ownerUserId,
+          transactionData.ownerFirebaseUid || null,
+          clientId,
+          accountId,
+          transactionData.customerFirestoreId || transactionData.clientFirestoreId || null,
+          transactionData.accountFirestoreId || null,
+          transactionData.amount || transactionData.transactionAmount,
+          transactionData.currency || transactionData.currencyCode || 'IQD',
+          normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
+          transactionData.note || transactionData.transactionNote || null,
+          msToSeconds(transactionData.transactionDate || Date.now()),
+          intToBoolean(transactionData.notifyCustomer !== undefined ? transactionData.notifyCustomer : 0),
+          intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
+          transactionData.deviceId || null,
+          transactionData.transactionNumber || null,
+          transactionData.syncVersion || 1,
           msToSeconds(transactionData.createdAt || Date.now()),
           transactionData.entryType || null,
           transactionData.transferCompany || null,
