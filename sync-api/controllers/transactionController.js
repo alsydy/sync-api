@@ -33,18 +33,27 @@ function parseFirebaseUidFromAuth(req) {
   return req.user?.firebase_uid || req.user?.firebaseUid || req.user?.uid || null;
 }
 
-/**
- * IMPORTANT:
- * - notify_customer is an APP-level flag used by FCM logic.
- * - DO NOT overwrite it based on WhatsApp settings.
- * - Keep it driven by client/app payload only.
- */
-function normalizeNotifyCustomerValue(raw) {
-  // return:
-  // - boolean for explicit values
-  // - null if not provided (so UPDATE can COALESCE to keep existing)
-  if (raw === undefined) return null;
-  return intToBoolean(raw);
+async function computeNotifyCustomer(ownerUserId, clientId) {
+  // Server-driven notifications: depend only on user settings + client opt-out.
+  if (!ownerUserId || !clientId) return false;
+  try {
+    const [s, o] = await Promise.all([
+      pool.query(
+        'SELECT enable_whatsapp FROM whatsapp_user_settings WHERE user_id = $1 LIMIT 1',
+        [ownerUserId]
+      ),
+      pool.query(
+        'SELECT 1 FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [ownerUserId, clientId]
+      )
+    ]);
+    const enabled = s.rows.length > 0 && s.rows[0].enable_whatsapp === true;
+    const optedOut = o.rows.length > 0;
+    return enabled && !optedOut;
+  } catch (e) {
+    logger.warning('computeNotifyCustomer failed', { ownerUserId, clientId, error: e?.message });
+    return false;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -168,8 +177,6 @@ async function getTransactionById(req, res, next) {
       });
     }
 
-    // ملاحظة: هذا المسار تاريخيًا يستخدم transaction_id (BIGINT).
-    // إذا أرسلت UUID هنا سيعطي 404 غالبًا، لكن نتركه كما هو لتجنب كسر التوافق.
     const result = await pool.query(
       'SELECT * FROM financial_transactions WHERE transaction_id = $1 AND deleted_at IS NULL',
       [transactionId]
@@ -195,8 +202,6 @@ async function createTransaction(req, res, next) {
 
     // الحصول على ownerUserId الصحيح
     const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-
-    // ✅ clientId الصحيح
     const clientId = await normalizeClientId(
       transactionData.customerId || transactionData.clientId,
       transactionData.customerFirestoreId || transactionData.clientFirestoreId
@@ -204,14 +209,10 @@ async function createTransaction(req, res, next) {
     if (!clientId) {
       return res.status(400).json({
         success: false,
-        error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات.'
+        error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
       });
     }
-
-    // ✅ notify_customer يبقى من التطبيق فقط (ولا علاقة له بواتساب)
-    const notifyCustomerDb = (transactionData.notifyCustomer !== undefined)
-      ? intToBoolean(transactionData.notifyCustomer)
-      : false;
+    const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
     const result = await pool.query(
       `INSERT INTO financial_transactions (
@@ -242,7 +243,7 @@ async function createTransaction(req, res, next) {
         transactionData.direction || transactionData.transactionDirection,
         transactionData.note || transactionData.transactionNote || null,
         msToSeconds(transactionData.transactionDate || Date.now()),
-        notifyCustomerDb,
+        intToBoolean(notifyCustomerServer),
         intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
         transactionData.deviceId || null,
         transactionData.transactionNumber || null,
@@ -273,7 +274,7 @@ async function createTransaction(req, res, next) {
       req
     );
 
-    // ✅ WhatsApp Outbox (غير متزامن)
+    // ✅ WhatsApp Outbox (غير متزامن - لا يؤثر على زمن الاستجابة)
     setImmediate(() => {
       enqueueWhatsAppOutboxForTransaction(transaction)
         .then((r) => {
@@ -291,44 +292,6 @@ async function createTransaction(req, res, next) {
           });
         });
     });
-
-    // ✅ FCM يبقى كما هو: يعتمد على notify_customer القادم من التطبيق
-    if (transaction.notify_customer) {
-      setImmediate(async () => {
-        try {
-          const [customerResult, ownerResult] = await Promise.all([
-            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
-            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
-          ]);
-
-          const customer = customerResult.rows[0];
-          const owner = ownerResult.rows[0];
-
-          if (customer && owner && customer.phone_number) {
-            const notifResult = await sendTransactionNotification(transaction, customer, owner);
-            if (!notifResult.success) {
-              logger.warning('Transaction notification failed', {
-                transactionUuid: transaction.transaction_uuid,
-                reason: notifResult.reason || notifResult.error
-              });
-            }
-          } else {
-            logger.warning('Cannot send notification: missing data', {
-              transactionUuid: transaction.transaction_uuid,
-              hasCustomer: !!customer,
-              hasOwner: !!owner,
-              hasPhone: !!(customer?.phone_number)
-            });
-          }
-        } catch (notifError) {
-          logger.error('Error sending transaction notification', {
-            error: notifError.message,
-            stack: notifError.stack,
-            transactionUuid: transaction.transaction_uuid
-          });
-        }
-      });
-    }
 
     res.status(201).json({ success: true, data: mapTransactionToAPI(transaction) });
   } catch (error) {
@@ -376,42 +339,40 @@ async function syncTransaction(req, res, next) {
         }
       }
 
-      // ownerUserId الصحيح
+      // الحصول على ownerUserId الصحيح
       const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
+
       if (!ownerUserId) {
+        logger.error('ownerUserId is null in UPDATE transaction', { transactionData });
         return res.status(400).json({
           success: false,
-          error: 'ownerUserId مطلوب - لا يمكن العثور على المستخدم في قاعدة البيانات.'
+          error: 'ownerUserId مطلوب - لا يمكن العثور على المستخدم في قاعدة البيانات. يرجى التأكد من أن المستخدم مسجل في النظام.'
         });
       }
 
-      // clientId الصحيح
+      // الحصول على clientId الصحيح
       const clientId = await normalizeClientId(
         transactionData.customerId || transactionData.clientId,
         transactionData.customerFirestoreId || transactionData.clientFirestoreId
       );
-      if (!clientId) {
-        return res.status(400).json({
-          success: false,
-          error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات.'
-        });
-      }
 
-      // accountId الصحيح
+      // الحصول على accountId الصحيح
       const accountId = await normalizeAccountId(
         transactionData.accountId,
         transactionData.accountFirestoreId
       );
+
       if (!accountId) {
+        logger.error('accountId is null in UPDATE transaction', { transactionData });
         return res.status(400).json({
           success: false,
-          error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات.'
+          error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
         });
       }
 
-      // ✅ notify_customer: لا نغيّره إلا إذا وصل من التطبيق (وإلا نخليه كما هو)
-      const notifyCustomerMaybe = normalizeNotifyCustomerValue(transactionData.notifyCustomer);
+      const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
+      // تحديث المعاملة الموجودة
       const result = await pool.query(
         `UPDATE financial_transactions SET
           cloud_id = COALESCE($2, cloud_id),
@@ -427,7 +388,7 @@ async function syncTransaction(req, res, next) {
           transaction_direction = $12,
           transaction_note = COALESCE($13, transaction_note),
           transaction_date = to_timestamp($14),
-          notify_customer = COALESCE($15, notify_customer),
+          notify_customer = $15,
           is_synced = COALESCE($16, is_synced),
           device_id = COALESCE($17, device_id),
           transaction_number = COALESCE($18, transaction_number),
@@ -459,7 +420,7 @@ async function syncTransaction(req, res, next) {
           normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
           transactionData.note || transactionData.transactionNote,
           msToSeconds(transactionData.transactionDate),
-          notifyCustomerMaybe, // ✅ قد تكون null
+          intToBoolean(notifyCustomerServer),
           intToBoolean(transactionData.synced),
           transactionData.deviceId,
           transactionData.transactionNumber,
@@ -489,7 +450,7 @@ async function syncTransaction(req, res, next) {
         req
       );
 
-      // ✅ WhatsApp Outbox (غير متزامن)
+      // ✅ WhatsApp Outbox (غير متزامن - لا يؤثر على زمن الاستجابة)
       setImmediate(() => {
         enqueueWhatsAppOutboxForTransaction(transaction)
           .then((r) => {
@@ -508,7 +469,7 @@ async function syncTransaction(req, res, next) {
           });
       });
 
-      // ✅ FCM يبقى كما هو
+      // ✅ إرسال إشعار FCM إذا كان notify_customer = true
       if (transaction.notify_customer) {
         setImmediate(async () => {
           try {
@@ -521,6 +482,13 @@ async function syncTransaction(req, res, next) {
             const owner = ownerResult.rows[0];
 
             if (customer && owner && customer.phone_number) {
+              logger.info('Sending transaction notification', {
+                transactionUuid: transaction.transaction_uuid,
+                customerId: customer.client_id,
+                customerPhone: customer.phone_number,
+                ownerId: owner.user_id
+              });
+
               const notifResult = await sendTransactionNotification(transaction, customer, owner);
               if (!notifResult.success) {
                 logger.warning('Transaction notification failed', {
@@ -547,102 +515,94 @@ async function syncTransaction(req, res, next) {
       }
 
       return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'updated' });
-    }
+    } else {
+      // INSERT جديد
+      const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
 
-    // ------------------------------------------------------------------------
-    // INSERT جديد (عند عدم وجود المعاملة)
-    // ------------------------------------------------------------------------
-    const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
+      const clientId = await normalizeClientId(
+        transactionData.customerId || transactionData.clientId,
+        transactionData.customerFirestoreId || transactionData.clientFirestoreId
+      );
 
-    const clientId = await normalizeClientId(
-      transactionData.customerId || transactionData.clientId,
-      transactionData.customerFirestoreId || transactionData.clientFirestoreId
-    );
-    if (!clientId) {
-      return res.status(400).json({
-        success: false,
-        error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات.'
-      });
-    }
+      let accountId = await normalizeAccountId(
+        transactionData.accountId,
+        transactionData.accountFirestoreId
+      );
 
-    let accountId = await normalizeAccountId(
-      transactionData.accountId,
-      transactionData.accountFirestoreId
-    );
+      // إذا كان accountFirestoreId هو "shared-main-account-v1" ولم يُوجد، أنشئه
+      if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
+        logger.info(`Creating shared main account with ownerUserId: ${ownerUserId}`);
+        try {
+          const sharedAccountUuid = '00000000-0000-0000-0000-000000000001';
+          const now = Date.now();
+          const createdAtSeconds = msToSeconds(now);
+          const colorValue = 0xFF0A84FF;
+          const colorHex = normalizeColorCode(colorValue);
 
-    // إذا كان accountFirestoreId هو "shared-main-account-v1" ولم يُوجد، أنشئه
-    if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
-      try {
-        const sharedAccountUuid = '00000000-0000-0000-0000-000000000001';
-        const now = Date.now();
-        const createdAtSeconds = msToSeconds(now);
-        const colorValue = 0xFF0A84FF;
-        const colorHex = normalizeColorCode(colorValue);
+          const createResult = await pool.query(
+            `INSERT INTO cash_accounts (
+              account_uuid, firestore_id, owner_user_id, owner_firebase_uid, account_name, is_primary, is_shared,
+              color_code, sync_version, created_at, updated_at
+            ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), CURRENT_TIMESTAMP)
+            ON CONFLICT (account_uuid) DO UPDATE SET
+              account_name = EXCLUDED.account_name,
+              is_primary = EXCLUDED.is_primary,
+              is_shared = EXCLUDED.is_shared,
+              firestore_id = EXCLUDED.firestore_id,
+              updated_at = CURRENT_TIMESTAMP
+            RETURNING account_id`,
+            [
+              sharedAccountUuid,
+              'shared-main-account-v1',
+              ownerUserId,
+              transactionData.ownerFirebaseUid || null,
+              'الصندوق الرئيسي',
+              true,
+              true,
+              colorHex,
+              1,
+              createdAtSeconds
+            ]
+          );
 
-        const createResult = await pool.query(
-          `INSERT INTO cash_accounts (
-            account_uuid, firestore_id, owner_user_id, owner_firebase_uid, account_name, is_primary, is_shared,
-            color_code, sync_version, created_at, updated_at
-          ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), CURRENT_TIMESTAMP)
-          ON CONFLICT (account_uuid) DO UPDATE SET
-            account_name = EXCLUDED.account_name,
-            is_primary = EXCLUDED.is_primary,
-            is_shared = EXCLUDED.is_shared,
-            firestore_id = EXCLUDED.firestore_id,
-            updated_at = CURRENT_TIMESTAMP
-          RETURNING account_id`,
-          [
-            sharedAccountUuid,
-            'shared-main-account-v1',
-            ownerUserId,
-            transactionData.ownerFirebaseUid || null,
-            'الصندوق الرئيسي',
-            true,
-            true,
-            colorHex,
-            1,
-            createdAtSeconds
-          ]
-        );
-
-        if (createResult.rows.length > 0) {
-          accountId = createResult.rows[0].account_id;
-        }
-      } catch (error) {
-        logger.error(`Error creating shared main account: ${error.message}`);
-        if (error.code === '23505') {
-          accountId = await getAccountIdFromFirestoreId('shared-main-account-v1');
+          if (createResult.rows.length > 0) {
+            accountId = createResult.rows[0].account_id;
+            logger.info(`Created shared main account with account_id: ${accountId}`);
+          }
+        } catch (error) {
+          logger.error(`Error creating shared main account: ${error.message}`);
+          if (error.code === '23505') {
+            logger.info(`Account already exists, searching again...`);
+            accountId = await getAccountIdFromFirestoreId('shared-main-account-v1');
+          }
         }
       }
-    }
 
-    if (!accountId) {
-      return res.status(400).json({
-        success: false,
-        error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات.'
-      });
-    }
+      if (!accountId) {
+        logger.error('accountId is null in INSERT transaction', { transactionData });
+        return res.status(400).json({
+          success: false,
+          error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
+        });
+      }
 
-    // ✅ notify_customer يبقى من التطبيق فقط
-    const notifyCustomerDb = (transactionData.notifyCustomer !== undefined)
-      ? intToBoolean(transactionData.notifyCustomer)
-      : false;
+      const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
-    const result = await pool.query(
-      `INSERT INTO financial_transactions (
-        transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
-        client_id, account_id, client_firestore_id, account_firestore_id,
-        transaction_amount, currency_code, transaction_direction, transaction_note, transaction_date,
-        notify_customer, is_synced, device_id, transaction_number, sync_version,
-        created_at, updated_at,
-        entry_type, transfer_company, transfer_recipient, transfer_sender, transfer_number,
-        fee_amount, fee_currency, center_fee_amount, center_fee_currency
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP,
-        $21, $22, $23, $24, $25, $26, $27, $28, $29)
-      RETURNING *`,
-      [
-        uuid,
-        transactionData.cloudId || null,
+      const result = await pool.query(
+        `INSERT INTO financial_transactions (
+          transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
+          client_id, account_id, client_firestore_id, account_firestore_id,
+          transaction_amount, currency_code, transaction_direction, transaction_note, transaction_date,
+          notify_customer, is_synced, device_id, transaction_number, sync_version,
+          created_at, updated_at,
+          entry_type, transfer_company, transfer_recipient, transfer_sender, transfer_number,
+          fee_amount, fee_currency, center_fee_amount, center_fee_currency
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, to_timestamp($14), $15, $16, $17, $18, $19, to_timestamp($20), CURRENT_TIMESTAMP,
+          $21, $22, $23, $24, $25, $26, $27, $28, $29)
+        RETURNING *`,
+        [
+          uuid,
+          transactionData.cloudId || null,
         transactionData.firestoreId || null,
         ownerUserId,
         transactionData.ownerFirebaseUid || null,
@@ -655,95 +615,102 @@ async function syncTransaction(req, res, next) {
         normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
         transactionData.note || transactionData.transactionNote || null,
         msToSeconds(transactionData.transactionDate || Date.now()),
-        notifyCustomerDb,
+        intToBoolean(notifyCustomerServer),
         intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
         transactionData.deviceId || null,
         transactionData.transactionNumber || null,
         transactionData.syncVersion || 1,
-        msToSeconds(transactionData.createdAt || Date.now()),
-        transactionData.entryType || null,
-        transactionData.transferCompany || null,
-        transactionData.transferRecipient || null,
-        transactionData.transferSender || null,
-        transactionData.transferNumber || null,
-        transactionData.feeAmount != null ? transactionData.feeAmount : null,
-        transactionData.feeCurrency || null,
-        transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
-        transactionData.centerFeeCurrency || null
-      ]
-    );
+          msToSeconds(transactionData.createdAt || Date.now()),
+          transactionData.entryType || null,
+          transactionData.transferCompany || null,
+          transactionData.transferRecipient || null,
+          transactionData.transferSender || null,
+          transactionData.transferNumber || null,
+          transactionData.feeAmount != null ? transactionData.feeAmount : null,
+          transactionData.feeCurrency || null,
+          transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
+          transactionData.centerFeeCurrency || null
+        ]
+      );
 
-    const transaction = result.rows[0];
+      const transaction = result.rows[0];
 
-    await logAudit(
-      transaction.owner_user_id,
-      transaction.owner_firebase_uid,
-      'create',
-      'transaction',
-      transaction.transaction_id.toString(),
-      null,
-      transaction,
-      req
-    );
+      await logAudit(
+        transaction.owner_user_id,
+        transaction.owner_firebase_uid,
+        'create',
+        'transaction',
+        transaction.transaction_id.toString(),
+        null,
+        transaction,
+        req
+      );
 
-    // ✅ WhatsApp Outbox (غير متزامن)
-    setImmediate(() => {
-      enqueueWhatsAppOutboxForTransaction(transaction)
-        .then((r) => {
-          if (r?.enqueued) {
-            logger.info('WhatsApp outbox enqueued', {
-              transactionUuid: transaction.transaction_uuid,
-              outboxId: r.outboxId
-            });
-          }
-        })
-        .catch((e) => {
-          logger.warning('WhatsApp outbox enqueue failed', {
-            transactionUuid: transaction.transaction_uuid,
-            error: e?.message
-          });
-        });
-    });
-
-    // ✅ FCM يبقى كما هو
-    if (transaction.notify_customer) {
-      setImmediate(async () => {
-        try {
-          const [customerResult, ownerResult] = await Promise.all([
-            pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
-            pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
-          ]);
-
-          const customer = customerResult.rows[0];
-          const owner = ownerResult.rows[0];
-
-          if (customer && owner && customer.phone_number) {
-            const notifResult = await sendTransactionNotification(transaction, customer, owner);
-            if (!notifResult.success) {
-              logger.warning('Transaction notification failed', {
+      // ✅ WhatsApp Outbox (غير متزامن)
+      setImmediate(() => {
+        enqueueWhatsAppOutboxForTransaction(transaction)
+          .then((r) => {
+            if (r?.enqueued) {
+              logger.info('WhatsApp outbox enqueued', {
                 transactionUuid: transaction.transaction_uuid,
-                reason: notifResult.reason || notifResult.error
+                outboxId: r.outboxId
               });
             }
-          } else {
-            logger.warning('Cannot send notification: missing data', {
+          })
+          .catch((e) => {
+            logger.warning('WhatsApp outbox enqueue failed', {
               transactionUuid: transaction.transaction_uuid,
-              hasCustomer: !!customer,
-              hasOwner: !!owner,
-              hasPhone: !!(customer?.phone_number)
+              error: e?.message
+            });
+          });
+      });
+
+      if (transaction.notify_customer) {
+        setImmediate(async () => {
+          try {
+            const [customerResult, ownerResult] = await Promise.all([
+              pool.query('SELECT * FROM business_clients WHERE client_id = $1', [transaction.client_id]),
+              pool.query('SELECT * FROM app_users WHERE user_id = $1', [transaction.owner_user_id])
+            ]);
+
+            const customer = customerResult.rows[0];
+            const owner = ownerResult.rows[0];
+
+            if (customer && owner && customer.phone_number) {
+              logger.info('Sending transaction notification', {
+                transactionUuid: transaction.transaction_uuid,
+                customerId: customer.client_id,
+                customerPhone: customer.phone_number,
+                ownerId: owner.user_id
+              });
+
+              const notifResult = await sendTransactionNotification(transaction, customer, owner);
+              if (!notifResult.success) {
+                logger.warning('Transaction notification failed', {
+                  transactionUuid: transaction.transaction_uuid,
+                  reason: notifResult.reason || notifResult.error
+                });
+              }
+            } else {
+              logger.warning('Cannot send notification: missing data', {
+                transactionUuid: transaction.transaction_uuid,
+                hasCustomer: !!customer,
+                hasOwner: !!owner,
+                hasPhone: !!(customer?.phone_number)
+              });
+            }
+          } catch (notifError) {
+            logger.error('Error sending transaction notification', {
+              error: notifError.message,
+              stack: notifError.stack,
+              transactionUuid: transaction.transaction_uuid
             });
           }
-        } catch (notifError) {
-          logger.error('Error sending transaction notification', {
-            error: notifError.message,
-            stack: notifError.stack,
-            transactionUuid: transaction.transaction_uuid
-          });
-        }
-      });
-    }
+        });
+      }
 
-    return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
+      return res.json({ success: true, data: mapTransactionToAPI(transaction), action: 'created' });
+    }
   } catch (error) {
     next(error);
   }
@@ -849,9 +816,23 @@ async function deleteTransactionById(req, res, next) {
 }
 
 // ----------------------------------------------------------------------------
-// Debt Tracking (من سجّل عليّ؟)  (كما هو عندك)
+// Debt Tracking (من سجّل عليّ؟)
 // ----------------------------------------------------------------------------
 
+/**
+ * GET /api/transactions/debt-summary
+ *
+ * ✅ السيناريو المطلوب:
+ * المستخدم الحالي يرى "من هم المستخدمون الذين سجّلوا قيوداً عليه/له"
+ *
+ * المنطق:
+ * - نحدد المستخدم الحالي (UID) من auth أو query
+ * - نجلب رقم هاتفه من app_users
+ * - نبحث عن كل client_id في business_clients حيث phone_number = رقم هاتفي
+ * - نجلب معاملات financial_transactions لهذه client_id
+ * - نجمع حسب owner_firebase_uid (المسجّل)
+ * - نستثني قيود المستخدم نفسه حتى لا يظهر لنفسه
+ */
 async function getDebtSummary(req, res, next) {
   try {
     const { currentUserPhone, currentUserFirebaseUid, currency } = req.query;
@@ -859,6 +840,7 @@ async function getDebtSummary(req, res, next) {
     const uidFromAuth = parseFirebaseUidFromAuth(req);
     let myFirebaseUid = uidFromAuth || currentUserFirebaseUid || null;
 
+    // fallback: إذا لا يوجد UID، نحاول من الهاتف (نجيب UID من app_users)
     if (!myFirebaseUid && currentUserPhone) {
       const r = await pool.query(
         'SELECT firebase_uid FROM app_users WHERE phone_number = $1 AND deleted_at IS NULL LIMIT 1',
@@ -871,6 +853,7 @@ async function getDebtSummary(req, res, next) {
       return res.status(400).json({ success: false, error: 'currentUserFirebaseUid مطلوب' });
     }
 
+    // 1) نجيب رقم الهاتف الخاص بي (المستخدم الحالي)
     const meRes = await pool.query(
       'SELECT phone_number FROM app_users WHERE firebase_uid = $1 AND deleted_at IS NULL LIMIT 1',
       [myFirebaseUid]
@@ -882,6 +865,10 @@ async function getDebtSummary(req, res, next) {
       return res.json({ success: true, data: [] });
     }
 
+    // ✅ (اختياري) طباعة تشخيص سريع
+    logger.debug('getDebtSummary: identity resolved', { myFirebaseUid, myPhone, currency });
+
+    // ✅ هذا هو الاستعلام الصحيح للسيناريو: "من سجّل عليّ؟"
     const sql = `
       WITH my_client_ids AS (
         SELECT bc.client_id
@@ -948,7 +935,17 @@ async function getDebtSummary(req, res, next) {
       ORDER BY bu.last_transaction_date DESC NULLS LAST;
     `;
 
+    const t0 = Date.now();
+    // ✅ إذا تم تمرير currency، نفلتر الدائنين الذين لديهم رصيد في هذه العملة
     const result = await pool.query(sql, [myPhone, myFirebaseUid, currency || null]);
+    const totalMs = Date.now() - t0;
+
+    logger.debug('getDebtSummary: done', {
+      myFirebaseUid,
+      myPhone,
+      rows: result.rows.length,
+      totalMs
+    });
 
     const users = result.rows.map((row) => {
       const totalDebit = row.total_debit !== null ? Number(row.total_debit) : 0;
@@ -964,6 +961,7 @@ async function getDebtSummary(req, res, next) {
           ? row.balances_by_currency
           : {};
 
+      // العملة الأساسية (للعرض) = أكبر رصيد مطلق
       const primaryCurrency = Object.keys(balancesByCurrency).length > 0
         ? Object.entries(balancesByCurrency).sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][0]
         : 'IQD';
@@ -975,7 +973,7 @@ async function getDebtSummary(req, res, next) {
         creditorFirebaseUid: row.recorder_firebase_uid,
         totalDebit,
         totalCredit,
-        netBalance,
+        netBalance, // ✅ الرصيد الإجمالي (يتم الفلترة حسب العملة في التطبيق)
         transactionCount: Number(row.transaction_count) || 0,
         currency: primaryCurrency,
         lastTransactionDate: Math.floor(lastDateMs),
@@ -989,6 +987,12 @@ async function getDebtSummary(req, res, next) {
   }
 }
 
+/**
+ * GET /api/transactions/debt-details/:creditorFirebaseUid
+ *
+ * ✅ عند النقر على مستخدم من شاشة المتابعة:
+ * نعرض كل القيود التي سجّلها هذا المستخدم عليّ (أنا = رقم هاتفي)
+ */
 async function getDebtDetails(req, res, next) {
   try {
     const { creditorFirebaseUid } = req.params;
@@ -1044,6 +1048,8 @@ async function getDebtDetails(req, res, next) {
     `;
 
     const params = [myPhone, creditorFirebaseUid];
+
+    // ⚠️ مهم: أول باراميتر إضافي يبدأ من $3
     let idx = 3;
 
     if (limit) {
@@ -1072,6 +1078,7 @@ module.exports = {
   syncTransaction,
   deleteTransactionByUuid,
   deleteTransactionById,
-  getDebtSummary,
-  getDebtDetails
+  getDebtSummary, // ✅ ملخص "من سجّل عليّ"
+  getDebtDetails  // ✅ تفاصيل القيود عند الضغط
 };
+
