@@ -69,31 +69,47 @@ async function sendTransactionNotification(transaction, customer, owner) {
       return { success: false, reason: 'notify_customer_is_false' };
     }
 
-    // جلب FCM tokens للعميل (customer)
-    // البحث عن المستخدم الذي له نفس رقم الهاتف مثل العميل
-    // ✅ استخدام phone_number من app_users (ليس phone)
-    const customerTokens = await pool.query(
-      `SELECT uft.token, uft.is_primary, uft.firebase_uid
-       FROM user_fcm_tokens uft
-       JOIN app_users au ON uft.firebase_uid = au.firebase_uid
-       WHERE au.phone_number = $1 
-         AND uft.is_active = TRUE
-         AND au.deleted_at IS NULL
-       ORDER BY uft.is_primary DESC, uft.last_used_at DESC
-       LIMIT 10`,
+    // جلب firebase_uid للعميل عبر رقم الهاتف فقط (لا نستخدم owner.firebase_uid نهائياً)
+    const customerUser = await pool.query(
+      `SELECT firebase_uid
+       FROM app_users
+       WHERE phone_number = $1
+         AND deleted_at IS NULL
+       LIMIT 1`,
       [customer.phone_number]
     );
-    
+
+    const customerFirebaseUid = customerUser.rows?.[0]?.firebase_uid || null;
+    if (!customerFirebaseUid) {
+      logger.warning(`No app user found for customer phone`, {
+        customerId: customer.client_id,
+        phoneNumber: customer.phone_number
+      });
+      return { success: false, reason: 'no_customer_user' };
+    }
+
+    const customerTokens = await pool.query(
+      `SELECT token, is_primary, firebase_uid
+       FROM user_fcm_tokens
+       WHERE firebase_uid = $1
+         AND is_active = TRUE
+       ORDER BY is_primary DESC, last_used_at DESC
+       LIMIT 10`,
+      [customerFirebaseUid]
+    );
+
     logger.info(`Searching FCM tokens for customer`, {
       customerId: customer.client_id,
       phoneNumber: customer.phone_number,
+      customerFirebaseUid,
       tokensFound: customerTokens.rows.length
     });
 
     if (customerTokens.rows.length === 0) {
       logger.warning(`No FCM tokens found for customer`, {
         customerId: customer.client_id,
-        phoneNumber: customer.phone_number
+        phoneNumber: customer.phone_number,
+        customerFirebaseUid
       });
       return { success: false, reason: 'no_fcm_tokens' };
     }
