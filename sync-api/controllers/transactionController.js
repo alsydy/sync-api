@@ -202,7 +202,16 @@ async function createTransaction(req, res, next) {
 
     // الحصول على ownerUserId الصحيح
     const ownerUserId = await normalizeOwnerUserId(transactionData.ownerUserId, transactionData.ownerFirebaseUid);
-    const clientId = transactionData.customerId || transactionData.clientId;
+    const clientId = await normalizeClientId(
+      transactionData.customerId || transactionData.clientId,
+      transactionData.customerFirestoreId || transactionData.clientFirestoreId
+    );
+    if (!clientId) {
+      return res.status(400).json({
+        success: false,
+        error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
+      });
+    }
     const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
     const result = await pool.query(
