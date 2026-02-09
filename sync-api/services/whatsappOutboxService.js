@@ -8,6 +8,9 @@ const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/database');
 const logger = require('../utils/logger');
 
+// Note: current DB schema uses columns:
+// id (uuid), to_phone, tries, max_tries, next_retry_at, next_attempt_at (nullable)
+
 async function isUserWhatsappEnabled(userId) {
   try {
     const r = await pool.query(
@@ -136,12 +139,14 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   }
 
   let customerName = null;
+  let clientPhone = null;
   try {
     const c = await pool.query(
-      'SELECT client_name FROM business_clients WHERE client_id = $1 LIMIT 1',
+      'SELECT client_name, phone_number FROM business_clients WHERE client_id = $1 LIMIT 1',
       [clientId]
     );
     customerName = c.rows?.[0]?.client_name || null;
+    clientPhone = c.rows?.[0]?.phone_number || null;
   } catch (_) {}
 
   const msg = buildMessage({
@@ -155,24 +160,33 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
 
   const outboxId = uuidv4();
 
-  // حاول إدراج outbox. إذا فشل بسبب schema مختلف، لا نكسر إنشاء المعاملة.
+  // Schema requires to_phone (NOT NULL) + tries/max_tries/next_retry_at
+  if (!clientPhone) {
+    await ensureTransactionStatusRow(transaction);
+    return { enqueued: false, reason: 'missing_client_phone' };
+  }
+
   try {
+    const maxTries = Number(process.env.MAX_ATTEMPTS || 5);
     await pool.query(
       `
       INSERT INTO whatsapp_outbox (
-        outbox_id,
+        id,
         user_id,
         client_id,
         transaction_uuid,
         transaction_id,
+        to_phone,
         message_text,
         status,
-        attempts,
+        tries,
+        max_tries,
+        next_retry_at,
         created_at,
         updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `,
-      [outboxId, ownerUserId, clientId, tUuid, tId || null, msg]
+      [outboxId, ownerUserId, clientId, tUuid, tId || null, clientPhone, msg, maxTries]
     );
   } catch (e) {
     logger.warning('Failed to insert whatsapp_outbox (schema may differ)', {
@@ -192,4 +206,3 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
 module.exports = {
   enqueueWhatsAppOutboxForTransaction
 };
-
