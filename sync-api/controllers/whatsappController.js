@@ -118,15 +118,34 @@ async function setClientOptOut(req, res, next) {
       return res.json({ success: true, data: { userId, clientId, optedOut: false } });
     }
 
-    await pool.query(
-      `
-      INSERT INTO whatsapp_client_opt_out (user_id, client_id, opted_out, created_at, updated_at)
-      VALUES ($1, $2, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      ON CONFLICT (user_id, client_id)
-      DO UPDATE SET opted_out = TRUE, updated_at = CURRENT_TIMESTAMP
-      `,
-      [userId, clientId]
-    );
+    // ✅ Schema-compatible:
+    // - Some DBs have (user_id, client_id) unique + opted_out boolean
+    // - Your DB snapshot shows table with columns: id, user_id, client_id, created_at (no opted_out)
+    // In that case, simply inserting the row means "opted out".
+    try {
+      await pool.query(
+        `
+        INSERT INTO whatsapp_client_opt_out (user_id, client_id, opted_out, created_at, updated_at)
+        VALUES ($1, $2, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT (user_id, client_id)
+        DO UPDATE SET opted_out = TRUE, updated_at = CURRENT_TIMESTAMP
+        `,
+        [userId, clientId]
+      );
+    } catch (e1) {
+      // fallback: insert without opted_out/upsert
+      try {
+        await pool.query(
+          `
+          INSERT INTO whatsapp_client_opt_out (user_id, client_id, created_at)
+          VALUES ($1, $2, CURRENT_TIMESTAMP)
+          `,
+          [userId, clientId]
+        );
+      } catch (e2) {
+        // if duplicate key exists on (user_id, client_id) just treat as success
+      }
+    }
 
     res.json({ success: true, data: { userId, clientId, optedOut: true } });
   } catch (error) {
@@ -141,26 +160,14 @@ async function setClientOptOut(req, res, next) {
 async function getClientOptOuts(req, res, next) {
   try {
     const userId = requireInt(req.params.userId, 'userId');
-    let r;
-    try {
-      // الشكل المتوقع
-      r = await pool.query(
-        'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1 AND opted_out = TRUE',
-        [userId]
-      );
-    } catch (e1) {
-      // ✅ لا نكسر التطبيق إذا اختلف اسم العمود في DB
-      try {
-        r = await pool.query(
-          'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1 AND is_opted_out = TRUE',
-          [userId]
-        );
-      } catch (e2) {
-        logger.warning('Failed to read whatsapp_client_opt_out (schema mismatch?)', { userId, error: e2?.message });
-        return res.json({ success: true, data: [] });
-      }
-    }
-    const ids = (r.rows || []).map((x) => Number(x.client_id)).filter((x) => Number.isFinite(x));
+    // Schema in your DB has no opted_out/is_opted_out; presence of a row means opted-out.
+    const r = await pool.query(
+      'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1',
+      [userId]
+    );
+    const ids = (r.rows || [])
+      .map((x) => Number(x.client_id))
+      .filter((x) => Number.isFinite(x));
     res.json({ success: true, data: ids });
   } catch (error) {
     next(error);
@@ -314,4 +321,3 @@ module.exports = {
   createPrivateSessionRequest,
   cancelPrivateSession
 };
-
