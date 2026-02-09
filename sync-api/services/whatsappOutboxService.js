@@ -27,12 +27,21 @@ async function isUserWhatsappEnabled(userId) {
 
 async function isClientOptedOut(userId, clientId) {
   try {
-    const r = await pool.query(
-      'SELECT opted_out FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
-      [userId, clientId]
-    );
-    if (r.rows.length === 0) return false;
-    return r.rows[0]?.opted_out === true;
+    // Your schema may not have opted_out; treat any row as opted-out.
+    try {
+      const r = await pool.query(
+        'SELECT opted_out FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [userId, clientId]
+      );
+      if (r.rows.length === 0) return false;
+      return r.rows[0]?.opted_out === true;
+    } catch (e) {
+      const r2 = await pool.query(
+        'SELECT 1 FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+        [userId, clientId]
+      );
+      return r2.rows.length > 0;
+    }
   } catch (e) {
     // إذا لم يوجد الجدول/الأعمدة لا نمنع الإرسال (آمن/متسامح)
     logger.warning('WhatsApp client opt-out lookup failed (schema may differ)', { userId, clientId, error: e?.message });
@@ -149,6 +158,12 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     clientPhone = c.rows?.[0]?.phone_number || null;
   } catch (_) {}
 
+  // Enforce client phone source (no owner/user phone fallback).
+  if (!clientPhone) {
+    await ensureTransactionStatusRow(transaction);
+    return { enqueued: false, reason: 'missing_client_phone' };
+  }
+
   const msg = buildMessage({
     customerName,
     amount: transaction.transaction_amount,
@@ -159,12 +174,6 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   });
 
   const outboxId = uuidv4();
-
-  // Schema requires to_phone (NOT NULL) + tries/max_tries/next_retry_at
-  if (!clientPhone) {
-    await ensureTransactionStatusRow(transaction);
-    return { enqueued: false, reason: 'missing_client_phone' };
-  }
 
   try {
     const maxTries = Number(process.env.MAX_ATTEMPTS || 5);
