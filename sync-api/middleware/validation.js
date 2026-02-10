@@ -5,11 +5,87 @@
 // ============================================================================
 
 const { body, param, query, validationResult } = require('express-validator');
-const logger = require('../utils/logger');
+
+// ✅ Logger import (robust path resolution)
+let logger = console;
+try {
+  // إذا الملف داخل /middleware
+  logger = require('../utils/logger');
+} catch (e1) {
+  try {
+    // إذا الملف في الجذر
+    logger = require('./utils/logger');
+  } catch (e2) {
+    logger = console;
+  }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
 
 /**
- * Middleware للتحقق من نتائج validation
+ * Normalize user fields قبل التحقق (يدعم name/fullName + phone/phoneNumber)
  */
+function normalizeUserBody(req) {
+  if (!req.body || typeof req.body !== 'object') return;
+
+  // name -> fullName
+  if ((!req.body.fullName || String(req.body.fullName).trim() === '') && req.body.name) {
+    req.body.fullName = req.body.name;
+  }
+
+  // phoneNumber -> phone
+  if ((!req.body.phone || String(req.body.phone).trim() === '') && req.body.phoneNumber) {
+    req.body.phone = req.body.phoneNumber;
+  }
+
+  // phone normalization (Yemen-friendly)
+  if (typeof req.body.phone === 'string') {
+    const p0 = req.body.phone.trim();
+
+    // 775410201 -> +967775410201
+    if (/^7\d{8}$/.test(p0)) {
+      req.body.phone = `+967${p0}`;
+      return;
+    }
+
+    // 967775410201 -> +967775410201
+    if (/^9677\d{8}$/.test(p0)) {
+      req.body.phone = `+${p0}`;
+      return;
+    }
+
+    // Keep as is otherwise
+    req.body.phone = p0;
+  }
+}
+
+/**
+ * Phone validation:
+ * - Accept +<digits> length 8..16 (E.164-ish)
+ * - Accept digits only length 7..15
+ * - Specifically accept Yemen:
+ *    7xxxxxxxx (9 digits)
+ *    9677xxxxxxxx (12 digits)
+ *    +9677xxxxxxxx (13 chars including +)
+ */
+function isValidPhone(val) {
+  if (val === undefined || val === null) return true; // optional field
+  const s = String(val).trim();
+  if (s.length === 0) return true;
+
+  if (/^\+?[0-9]{7,15}$/.test(s)) return true;       // general
+  if (/^7\d{8}$/.test(s)) return true;               // Yemen local
+  if (/^9677\d{8}$/.test(s)) return true;            // Yemen without +
+  if (/^\+9677\d{8}$/.test(s)) return true;          // Yemen with +
+  return false;
+}
+
+// ============================================================================
+// Middleware للتحقق من نتائج validation
+// ============================================================================
+
 const validate = (req, res, next) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
@@ -18,18 +94,19 @@ const validate = (req, res, next) => {
       message: err.msg,
       value: err.value
     }));
-    
-    logger.warn('Validation failed', {
-      errors: errorDetails,
-      path: req.path,
-      method: req.method,
-      body: req.body
-    });
-    
-    // ✅ إرجاع رسالة خطأ أكثر وضوحاً
+
+    if (logger?.warn) {
+      logger.warn('Validation failed', {
+        errors: errorDetails,
+        path: req.path,
+        method: req.method,
+        body: req.body
+      });
+    }
+
     const firstError = errorDetails[0];
     const errorMessage = firstError ? firstError.message : 'خطأ في التحقق من البيانات';
-    
+
     return res.status(400).json({
       success: false,
       error: errorMessage,
@@ -45,13 +122,17 @@ const validate = (req, res, next) => {
 
 /**
  * Validation rules لتسجيل الدخول
+ * ✅ عدلناها لتقبل +967... أو أرقام فقط
  */
 const validateLogin = [
   body('phone')
     .notEmpty().withMessage('رقم الهاتف مطلوب')
     .trim()
     .isString().withMessage('رقم الهاتف يجب أن يكون نص')
-    .matches(/^[0-9]{7,15}$/).withMessage('رقم الهاتف يجب أن يكون أرقام فقط (7-15 رقم)'),
+    .custom((v) => {
+      if (!isValidPhone(v)) throw new Error('رقم الهاتف غير صحيح');
+      return true;
+    }),
   body('password')
     .notEmpty().withMessage('كلمة المرور مطلوبة')
     .isLength({ min: 6 }).withMessage('كلمة المرور يجب أن تكون 6 أحرف على الأقل'),
@@ -60,27 +141,61 @@ const validateLogin = [
 
 /**
  * Validation rules للمستخدم
+ * ✅ قبل الفحص نعمل normalize للحقول (name/fullName + phone/phoneNumber)
+ * ✅ phone: لم يعد ar-IQ
+ * ✅ accountNumber: اختياري ولا يفشل لو null
  */
 const validateUser = [
+  // Normalize first
+  (req, _res, next) => {
+    try { normalizeUserBody(req); } catch (_) {}
+    next();
+  },
+
   body('phone')
     .optional()
-    .isMobilePhone('ar-IQ').withMessage('رقم الهاتف غير صحيح'),
+    .trim()
+    .custom((v) => {
+      if (!isValidPhone(v)) throw new Error('رقم الهاتف غير صحيح');
+      return true;
+    }),
+
+  body('phoneNumber')
+    .optional()
+    .trim()
+    .custom((v) => {
+      // نسمح به أيضاً حتى لو ما تم تحويله لأي سبب
+      if (!isValidPhone(v)) throw new Error('رقم الهاتف غير صحيح');
+      return true;
+    }),
+
   body('name')
     .optional()
     .isLength({ min: 2, max: 255 }).withMessage('الاسم يجب أن يكون بين 2 و 255 حرف'),
+
   body('fullName')
     .optional()
     .isLength({ min: 2, max: 255 }).withMessage('الاسم الكامل يجب أن يكون بين 2 و 255 حرف'),
+
   body('firebaseUid')
     .optional()
     .isString().withMessage('firebaseUid يجب أن يكون نص')
     .isLength({ min: 1, max: 128 }).withMessage('firebaseUid يجب أن يكون بين 1 و 128 حرف'),
+
   body('userUuid')
     .optional()
     .isUUID().withMessage('userUuid يجب أن يكون UUID صحيح'),
+
+  // ✅ مهم: لا تفشل إذا كانت null (السيرفر قد يولّدها)
   body('accountNumber')
-    .optional()
-    .isInt({ min: 1 }).withMessage('رقم الحساب يجب أن يكون رقم موجب'),
+    .optional({ nullable: true })
+    .custom((v) => {
+      if (v === null || v === undefined || v === '') return true;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1) throw new Error('رقم الحساب يجب أن يكون رقم موجب');
+      return true;
+    }),
+
   validate
 ];
 
@@ -204,4 +319,3 @@ module.exports = {
   validateUUID,
   validateID
 };
-
