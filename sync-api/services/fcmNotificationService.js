@@ -48,6 +48,11 @@ function initializeFirebase() {
 // تهيئة Firebase عند تحميل الملف
 initializeFirebase();
 
+function normalizePhoneDigits(value) {
+  if (!value) return '';
+  return String(value).replace(/\D/g, '');
+}
+
 /**
  * إرسال إشعار FCM عند إنشاء/تحديث معاملة
  * @param {Object} transaction - بيانات المعاملة من قاعدة البيانات
@@ -79,7 +84,22 @@ async function sendTransactionNotification(transaction, customer, owner) {
       [customer.phone_number]
     );
 
-    const customerFirebaseUid = customerUser.rows?.[0]?.firebase_uid || null;
+    let customerFirebaseUid = customerUser.rows?.[0]?.firebase_uid || null;
+    if (!customerFirebaseUid) {
+      const digits = normalizePhoneDigits(customer.phone_number);
+      if (digits) {
+        const customerUserByDigits = await pool.query(
+          `SELECT firebase_uid
+           FROM app_users
+           WHERE regexp_replace(phone_number, '\\D', '', 'g') = $1
+             AND deleted_at IS NULL
+           LIMIT 1`,
+          [digits]
+        );
+        customerFirebaseUid = customerUserByDigits.rows?.[0]?.firebase_uid || null;
+      }
+    }
+
     if (!customerFirebaseUid) {
       logger.warning(`No app user found for customer phone`, {
         customerId: customer.client_id,
