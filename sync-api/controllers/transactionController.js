@@ -34,22 +34,15 @@ function parseFirebaseUidFromAuth(req) {
 }
 
 async function computeNotifyCustomer(ownerUserId, clientId) {
-  // Server-driven notifications: depend only on user settings + client opt-out.
-  if (!ownerUserId || !clientId) return false;
+  // Server-driven notifications: depend only on owner preference (not WhatsApp settings).
+  if (!ownerUserId) return false;
   try {
-    const [s, o] = await Promise.all([
-      pool.query(
-        'SELECT enable_whatsapp FROM whatsapp_user_settings WHERE user_id = $1 LIMIT 1',
-        [ownerUserId]
-      ),
-      pool.query(
-        'SELECT 1 FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
-        [ownerUserId, clientId]
-      )
-    ]);
-    const enabled = s.rows.length > 0 && s.rows[0].enable_whatsapp === true;
-    const optedOut = o.rows.length > 0;
-    return enabled && !optedOut;
+    const s = await pool.query(
+      'SELECT receive_transaction_notifications FROM app_users WHERE user_id = $1 LIMIT 1',
+      [ownerUserId]
+    );
+    if (s.rows.length === 0) return false;
+    return s.rows[0].receive_transaction_notifications !== false;
   } catch (e) {
     logger.warning('computeNotifyCustomer failed', { ownerUserId, clientId, error: e?.message });
     return false;
