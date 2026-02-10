@@ -295,6 +295,12 @@ async function getClientIdFromFirestoreId(firestoreId) {
         'SELECT client_id FROM business_clients WHERE client_uuid = $1 LIMIT 1',
         [firestoreId]
       );
+      if (result.rows.length === 0) {
+        result = await pool.query(
+          'SELECT client_id FROM business_clients WHERE firestore_id = $1 LIMIT 1',
+          [firestoreId]
+        );
+      }
     } else {
       result = await pool.query(
         'SELECT client_id FROM business_clients WHERE firestore_id = $1 LIMIT 1',
@@ -327,6 +333,10 @@ async function getClientIdFromFirestoreId(firestoreId) {
 async function normalizeClientId(clientId, clientFirestoreId) {
   logger.debug('normalizeClientId', { clientId, clientFirestoreId });
   
+  if (clientId && typeof clientId === 'string' && /^\d+$/.test(clientId)) {
+    clientId = Number(clientId);
+  }
+
   if (clientId && typeof clientId === 'number') {
     // التحقق من وجود clientId في قاعدة البيانات
     try {
@@ -370,6 +380,12 @@ async function getAccountIdFromFirestoreId(firestoreId) {
         'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 LIMIT 1',
         [firestoreId]
       );
+      if (result.rows.length === 0) {
+        result = await pool.query(
+          'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1',
+          [firestoreId]
+        );
+      }
     } else {
       result = await pool.query(
         'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1',
@@ -402,6 +418,10 @@ async function getAccountIdFromFirestoreId(firestoreId) {
 async function normalizeAccountId(accountId, accountFirestoreId) {
   logger.debug('normalizeAccountId', { accountId, accountFirestoreId });
   
+  if (accountId && typeof accountId === 'string' && /^\d+$/.test(accountId)) {
+    accountId = Number(accountId);
+  }
+
   if (accountId && typeof accountId === 'number') {
     // التحقق من وجود accountId في قاعدة البيانات
     try {
