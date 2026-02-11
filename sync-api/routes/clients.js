@@ -1,50 +1,52 @@
-// ============================================================================
-// Client Routes
-// ============================================================================
-// Routes للعملاء (Clients)
-// ============================================================================
-
+/**
+ * ============================================================================
+ * Clients Routes
+ * ============================================================================
+ * ترتيب المسارات مهم جداً لتجنّب تعارض /:id مع مسارات مثل /sync و /by-uuid
+ * ============================================================================
+ */
 const express = require('express');
 const router = express.Router();
-const clientController = require('../controllers/clientController');
-const { optionalAuthenticate, syncLimiter } = require('../middleware/auth');
 
-/**
- * GET /api/clients
- * الحصول على جميع العملاء لمستخدم محدد
- */
-router.get('/', optionalAuthenticate, clientController.getClients);
+const {
+  getClients,
+  getClientById,
+  getClientByUuid,
+  getClientsByPhone,
+  createClient,
+  updateClient,
+  deleteClient,
+  deleteClientByUuid,
+  syncClient
+} = require('../controllers/clientController');
 
-/**
- * GET /api/clients/by-phone/:phoneNumber
- * البحث عن جميع العملاء برقم الهاتف (للمتابعة الديون)
- */
-router.get('/by-phone/:phoneNumber', optionalAuthenticate, clientController.getClientsByPhone);
+const { authenticate, syncLimiter } = require('../middleware/auth');
 
-/**
- * DELETE /api/clients/by-uuid/:clientUuid
- * حذف عميل (Soft Delete) حسب UUID
- */
-router.delete('/by-uuid/:clientUuid', optionalAuthenticate, clientController.deleteClientByUuid);
+// ------------------------------
+// Read
+// ------------------------------
+router.get('/', authenticate, getClients);
+router.get('/by-uuid/:clientUuid', authenticate, getClientByUuid);
+router.get('/by-phone/:phone', authenticate, getClientsByPhone);
 
-/**
- * PUT /api/clients/sync
- * مزامنة عميل (Insert or Update حسب UUID)
- *
- * مهم: يجب أن يسبق optionalAuthenticate أي limiter يعتمد على user/firebaseUid
- */
-router.put('/sync', optionalAuthenticate, syncLimiter, clientController.syncClient);
+// ------------------------------
+// Sync
+// ------------------------------
+router.put('/sync', authenticate, syncLimiter, syncClient);
 
-/**
- * POST /api/clients
- * إنشاء عميل جديد
- */
-router.post('/', optionalAuthenticate, clientController.createClient);
+// ------------------------------
+// CRUD
+// ------------------------------
+router.post('/', authenticate, createClient);
 
-/**
- * GET /api/clients/:clientId
- * الحصول على عميل محدد
- */
-router.get('/:clientId', optionalAuthenticate, clientController.getClientById);
+// تحديث بالحقل الرقمي (إن كان تطبيقك يستخدمه)
+router.put('/:clientId', authenticate, updateClient);
+
+// حذف بالرقم أو بالـ UUID (بدون تعارض مسارات)
+router.delete('/id/:clientId', authenticate, deleteClient);
+router.delete('/by-uuid/:clientUuid', authenticate, deleteClientByUuid);
+
+// Get by numeric id (keep last to avoid conflicts with other GET routes)
+router.get('/:clientId', authenticate, getClientById);
 
 module.exports = router;
