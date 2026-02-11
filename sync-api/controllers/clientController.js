@@ -4,470 +4,334 @@
 // Controller للعملاء (Clients)
 // ============================================================================
 
+'use strict';
+
 const { pool } = require('../config/database');
-const {
-  ensureUuid,
-  isValidUUID,
-  msToSeconds,
-  secondsToMs,
-  intToBoolean,
-  normalizeOwnerUserId
-} = require('../utils/helpers');
-const { mapClientToAPI } = require('../utils/mappers');
-const { logAudit } = require('../services/auditService');
-const { resolveConflict } = require('../services/conflictResolver');
 const logger = require('../utils/logger');
 const { v4: uuidv4 } = require('uuid');
 
-/**
- * Helpers
- */
-function pickClientUuid(clientData) {
-  // يقبل clientUuid أو entryId
-  const provided = clientData.clientUuid || clientData.entryId || null;
+const {
+  requireBody,
+  safeTrim,
+  safeNumber,
+  toIsoDate,
+  toDbTimestamp,
+  normalizeOwnerFirebaseUid,
+  normalizeOwnerUserId,
+  toDbBool,
+  toDbInt,
+  parseDeviceId,
+  normalizePhone,
+  validateUuid,
+} = require('../utils/helpers');
 
-  // إذا موجود لكنه غير UUID => خطأ واضح
-  if (provided && !isValidUUID(provided)) {
-    return { ok: false, uuid: null, error: 'clientUuid/entryId غير صالح - يجب أن يكون UUID صحيح' };
+/**
+ * Resolve a valid owner_user_id that actually exists in app_users.
+ * IMPORTANT: Prefer firebase_uid mapping when available, because the Android app may send a local ownerUserId (e.g. 1)
+ * that does NOT match PostgreSQL app_users.id.
+ */
+async function resolveOwnerUserId(pool, { ownerUserId, ownerFirebaseUid }) {
+  // 1) Prefer firebase_uid -> app_users.id
+  if (ownerFirebaseUid) {
+    const r = await pool.query(
+      'SELECT id FROM app_users WHERE firebase_uid = $1 LIMIT 1',
+      [ownerFirebaseUid]
+    );
+    if (r.rowCount > 0) return r.rows[0].id;
   }
 
-  // إذا غير موجود => ننشئ UUID (لكن الأفضل أن يكون التطبيق يرسله دائماً للمزامنة)
-  const uuid = provided || uuidv4();
-  return { ok: true, uuid };
+  // 2) Fallback: validate ownerUserId exists (if provided)
+  if (ownerUserId !== undefined && ownerUserId !== null && ownerUserId !== '') {
+    const r = await pool.query(
+      'SELECT id FROM app_users WHERE id = $1 LIMIT 1',
+      [ownerUserId]
+    );
+    if (r.rowCount > 0) return r.rows[0].id;
+  }
+
+  return null;
 }
 
 /**
  * GET /api/clients
- * الحصول على جميع العملاء لمستخدم محدد
+ * Query params:
+ *  - ownerUserId (optional)
+ *  - ownerFirebaseUid (optional)
+ *  - sinceTimestamp (optional, ms)
  */
-async function getClients(req, res, next) {
+async function getClients(req, res) {
   try {
-    const { ownerUserId, ownerFirebaseUid, archived, sinceTimestamp } = req.query;
+    const ownerUserId = req.query.ownerUserId ? Number(req.query.ownerUserId) : null;
+    const ownerFirebaseUid = req.query.ownerFirebaseUid ? String(req.query.ownerFirebaseUid).trim() : null;
+    const sinceTimestamp = req.query.sinceTimestamp ? Number(req.query.sinceTimestamp) : null;
 
-    let query = 'SELECT * FROM business_clients WHERE deleted_at IS NULL';
-    const params = [];
-    let paramIndex = 1;
+    const where = [];
+    const values = [];
+    let i = 1;
 
     if (ownerUserId) {
-      query += ` AND owner_user_id = $${paramIndex++}`;
-      params.push(ownerUserId);
+      where.push(`owner_user_id = $${i++}`);
+      values.push(ownerUserId);
+    } else if (ownerFirebaseUid) {
+      where.push(`owner_firebase_uid = $${i++}`);
+      values.push(ownerFirebaseUid);
     }
 
-    if (ownerFirebaseUid) {
-      query += ` AND owner_firebase_uid = $${paramIndex++}`;
-      params.push(ownerFirebaseUid);
-    }
-
-    if (archived !== undefined) {
-      query += ` AND is_archived = $${paramIndex++}`;
-      params.push(intToBoolean(archived));
-    }
-
-    // دعم المزامنة التزايدية
     if (sinceTimestamp) {
-      const sinceSeconds = msToSeconds(parseInt(sinceTimestamp, 10));
-      if (sinceSeconds) {
-        query += ` AND updated_at > to_timestamp($${paramIndex++})`;
-        params.push(sinceSeconds);
-      }
+      where.push(`updated_at >= to_timestamp($${i++} / 1000.0)`);
+      values.push(sinceTimestamp);
     }
 
-    query += ' ORDER BY updated_at DESC, created_at DESC';
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const result = await pool.query(query, params);
-    const clients = result.rows.map(row => mapClientToAPI(row));
+    const sql = `
+      SELECT
+        id,
+        client_uuid,
+        firestore_id,
+        owner_user_id,
+        owner_firebase_uid,
+        full_name,
+        phone,
+        address,
+        notes,
+        is_active,
+        created_at,
+        updated_at,
+        device_id,
+        deleted_at
+      FROM business_clients
+      ${whereSql}
+      ORDER BY updated_at DESC
+      LIMIT 1000
+    `;
 
-    res.json({ success: true, data: clients, count: clients.length });
-  } catch (error) {
-    next(error);
-  }
-}
+    const result = await pool.query(sql, values);
 
-/**
- * GET /api/clients/:clientId
- * الحصول على عميل محدد
- */
-async function getClientById(req, res, next) {
-  try {
-    const { clientId } = req.params;
-
-    // حماية إضافية (احتياط) - لكن بعد إصلاح ترتيب الراوتات غالباً لن تحتاجها
-    const reservedWords = ['sync', 'by-phone', 'by-uuid', 'health', 'info', 'stats'];
-    if (reservedWords.includes(String(clientId).toLowerCase())) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid client ID: "${clientId}" is a reserved word`
-      });
-    }
-
-    if (!/^\d+$/.test(String(clientId))) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid client ID format: "${clientId}" must be a number`
-      });
-    }
-
-    const result = await pool.query(
-      'SELECT * FROM business_clients WHERE client_id = $1 AND deleted_at IS NULL',
-      [clientId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'العميل غير موجود' });
-    }
-
-    res.json({ success: true, data: mapClientToAPI(result.rows[0]) });
-  } catch (error) {
-    next(error);
-  }
-}
-
-/**
- * POST /api/clients
- * إنشاء عميل جديد
- */
-async function createClient(req, res, next) {
-  try {
-    const clientData = ensureUuid(req.body);
-
-    const ownerUserId = await normalizeOwnerUserId(clientData.ownerUserId, clientData.ownerFirebaseUid);
-    if (!ownerUserId) {
-      return res.status(400).json({
-        success: false,
-        error: 'ownerUserId مطلوب - لا يمكن العثور على المستخدم في قاعدة البيانات'
-      });
-    }
-
-    const uuidInfo = pickClientUuid(clientData);
-    if (!uuidInfo.ok) {
-      return res.status(400).json({ success: false, error: uuidInfo.error });
-    }
-    const uuid = uuidInfo.uuid;
-
-    const clientName = (clientData.name || clientData.clientName || '').toString().trim();
-    if (!clientName) {
-      return res.status(400).json({ success: false, error: 'اسم العميل مطلوب' });
-    }
-
-    const createdAtSeconds = msToSeconds(clientData.createdAt || Date.now());
-
-    const result = await pool.query(
-      `INSERT INTO business_clients (
-        client_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
-        client_name, phone_number, job_title, notes, is_archived,
-        device_id, sync_version, created_at, updated_at, cached_total_balance
-      ) VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10,
-        $11, $12, to_timestamp($13), CURRENT_TIMESTAMP, $14
-      )
-      RETURNING *`,
-      [
-        uuid,
-        clientData.cloudId || null,
-        clientData.firestoreId || null,
-        ownerUserId,
-        clientData.ownerFirebaseUid || null,
-        clientName,
-        clientData.phone || clientData.phoneNumber || null,
-        clientData.jobTitle || null,
-        clientData.notes || null,
-        intToBoolean(clientData.archived !== undefined ? clientData.archived : 0),
-        clientData.deviceId || null,
-        clientData.syncVersion || 1,
-        createdAtSeconds,
-        clientData.cachedTotalBalance || null
-      ]
-    );
-
-    const client = result.rows[0];
-
-    await logAudit(
-      client.owner_user_id,
-      client.owner_firebase_uid,
-      'create',
-      'client',
-      String(client.client_id),
-      null,
-      client,
-      req
-    );
-
-    res.status(201).json({ success: true, data: mapClientToAPI(client), action: 'created' });
-  } catch (error) {
-    next(error);
-  }
-}
-
-/**
- * DELETE /api/clients/by-uuid/:clientUuid
- * حذف عميل (Soft Delete) حسب UUID
- */
-async function deleteClientByUuid(req, res, next) {
-  try {
-    const { clientUuid } = req.params;
-
-    if (!clientUuid) {
-      return res.status(400).json({ success: false, error: 'clientUuid مطلوب' });
-    }
-    if (!isValidUUID(clientUuid)) {
-      return res.status(400).json({ success: false, error: 'clientUuid غير صالح - يجب أن يكون UUID صحيح' });
-    }
-
-    const result = await pool.query(
-      `UPDATE business_clients
-       SET deleted_at = CURRENT_TIMESTAMP,
-           sync_version = sync_version + 1,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE client_uuid = $1 AND deleted_at IS NULL
-       RETURNING *`,
-      [clientUuid]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ success: false, error: 'العميل غير موجود' });
-    }
-
-    const client = result.rows[0];
-
-    await logAudit(
-      client.owner_user_id,
-      client.owner_firebase_uid,
-      'delete',
-      'client',
-      String(client.client_id),
-      client,
-      null,
-      req
-    );
-
-    res.json({ success: true, data: mapClientToAPI(client) });
-  } catch (error) {
-    next(error);
+    return res.json({
+      success: true,
+      data: result.rows || []
+    });
+  } catch (err) {
+    logger.error('getClients error', { error: err.message, stack: err.stack });
+    return res.status(500).json({
+      success: false,
+      message: 'حدث خطأ أثناء جلب العملاء'
+    });
   }
 }
 
 /**
  * PUT /api/clients/sync
- * مزامنة عميل (Insert or Update حسب UUID)
+ * Body:
+ *  { items: [ ...clients ] }
  */
-async function syncClient(req, res, next) {
+async function syncClients(req, res) {
   try {
-    const clientData = ensureUuid(req.body);
-
-    const uuidInfo = pickClientUuid(clientData);
-    if (!uuidInfo.ok) {
-      return res.status(400).json({ success: false, error: uuidInfo.error });
-    }
-    const uuid = uuidInfo.uuid;
-
-    // ✅ تحقق ownerUserId دائماً (حتى في update)
-    const ownerUserId = await normalizeOwnerUserId(clientData.ownerUserId, clientData.ownerFirebaseUid);
-    if (!ownerUserId) {
+    const items = req.body?.items;
+    if (!Array.isArray(items)) {
       return res.status(400).json({
         success: false,
-        error: 'ownerUserId مطلوب - لا يمكن العثور على المستخدم في قاعدة البيانات'
+        message: 'items مطلوب ويجب أن يكون مصفوفة'
       });
     }
 
-    const clientName = (clientData.name || clientData.clientName || '').toString().trim();
-    if (!clientName) {
-      return res.status(400).json({ success: false, error: 'اسم العميل مطلوب' });
-    }
+    const results = {
+      success: true,
+      total: items.length,
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      failed: 0,
+      errors: []
+    };
 
-    const existing = await pool.query(
-      'SELECT client_id, sync_version, updated_at FROM business_clients WHERE client_uuid = $1',
-      [uuid]
-    );
-
-    // ====== UPDATE ======
-    if (existing.rows.length > 0) {
-      const existingClient = existing.rows[0];
-
-      // حل التعارضات (اختياري)
-      if (clientData.syncVersion && existingClient.sync_version) {
-        const conflictResult = await resolveConflict('business_clients', uuid, clientData, {
-          syncVersion: existingClient.sync_version,
-          updatedAt: secondsToMs(existingClient.updated_at)
+    for (const item of items) {
+      try {
+        const r = await syncClient(item);
+        if (r === 'inserted') results.inserted++;
+        else if (r === 'updated') results.updated++;
+        else if (r === 'deleted') results.deleted++;
+      } catch (e) {
+        results.failed++;
+        results.errors.push({
+          clientUuid: item?.clientUuid || item?.client_uuid || null,
+          message: e.message
         });
-
-        if (conflictResult.winner !== clientData) {
-          const remoteClient = await pool.query('SELECT * FROM business_clients WHERE client_uuid = $1', [uuid]);
-          const client = remoteClient.rows[0];
-          return res.json({
-            success: true,
-            data: mapClientToAPI(client),
-            action: 'conflict_resolved',
-            conflict: true,
-            conflictReason: conflictResult.reason
-          });
-        }
       }
-
-      // archived: إذا undefined لا تغيّر القيمة
-      const archivedVal = (clientData.archived === undefined)
-        ? null
-        : intToBoolean(clientData.archived);
-
-      // ✅ sync_version: نزيد +1 دائماً، ونضمن عدم الرجوع للخلف
-      const incomingSync = Number.isFinite(Number(clientData.syncVersion))
-        ? parseInt(clientData.syncVersion, 10)
-        : null;
-
-      const baseSync = Math.max(
-        existingClient.sync_version || 0,
-        incomingSync || 0
-      );
-
-      const result = await pool.query(
-        `UPDATE business_clients SET
-          cloud_id = COALESCE($2, cloud_id),
-          firestore_id = COALESCE($3, firestore_id),
-          owner_user_id = $4,
-          owner_firebase_uid = COALESCE($5, owner_firebase_uid),
-          client_name = $6,
-          phone_number = COALESCE($7, phone_number),
-          job_title = COALESCE($8, job_title),
-          notes = COALESCE($9, notes),
-          is_archived = COALESCE($10, is_archived),
-          device_id = COALESCE($11, device_id),
-          cached_total_balance = COALESCE($12, cached_total_balance),
-          sync_version = $13,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE client_uuid = $1 AND deleted_at IS NULL
-        RETURNING *`,
-        [
-          uuid,
-          clientData.cloudId || null,
-          clientData.firestoreId || null,
-          ownerUserId,
-          clientData.ownerFirebaseUid || null,
-          clientName,
-          clientData.phone || clientData.phoneNumber || null,
-          clientData.jobTitle || null,
-          clientData.notes || null,
-          archivedVal,
-          clientData.deviceId || null,
-          clientData.cachedTotalBalance || null,
-          baseSync + 1
-        ]
-      );
-
-      const client = result.rows[0];
-
-      await logAudit(
-        client.owner_user_id,
-        client.owner_firebase_uid,
-        'update',
-        'client',
-        String(client.client_id),
-        existingClient,
-        client,
-        req
-      );
-
-      return res.json({ success: true, data: mapClientToAPI(client), action: 'updated' });
     }
 
-    // ====== INSERT ======
-    const createdAtSeconds = msToSeconds(clientData.createdAt || Date.now());
+    if (results.failed > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'فشل مزامنة بعض العملاء',
+        results
+      });
+    }
 
-    const result = await pool.query(
-      `INSERT INTO business_clients (
-        client_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
-        client_name, phone_number, job_title, notes, is_archived,
-        device_id, sync_version, created_at, updated_at, cached_total_balance
-      ) VALUES (
-        $1, $2, $3, $4, $5,
-        $6, $7, $8, $9, $10,
-        $11, $12, to_timestamp($13), CURRENT_TIMESTAMP, $14
-      )
-      RETURNING *`,
-      [
-        uuid,
-        clientData.cloudId || null,
-        clientData.firestoreId || null,
-        ownerUserId,
-        clientData.ownerFirebaseUid || null,
-        clientName,
-        clientData.phone || clientData.phoneNumber || null,
-        clientData.jobTitle || null,
-        clientData.notes || null,
-        intToBoolean(clientData.archived !== undefined ? clientData.archived : 0),
-        clientData.deviceId || null,
-        (clientData.syncVersion ? parseInt(clientData.syncVersion, 10) : 0) + 1,
-        createdAtSeconds,
-        clientData.cachedTotalBalance || null
-      ]
-    );
-
-    const client = result.rows[0];
-
-    await logAudit(
-      client.owner_user_id,
-      client.owner_firebase_uid,
-      'create',
-      'client',
-      String(client.client_id),
-      null,
-      client,
-      req
-    );
-
-    return res.json({ success: true, data: mapClientToAPI(client), action: 'created' });
-  } catch (error) {
-    logger.error('syncClient error', { error: error?.message, stack: error?.stack });
-    next(error);
+    return res.json({
+      success: true,
+      results
+    });
+  } catch (err) {
+    logger.error('syncClients error', { error: err.message, stack: err.stack });
+    return res.status(500).json({
+      success: false,
+      message: 'حدث خطأ أثناء مزامنة العملاء'
+    });
   }
 }
 
 /**
- * GET /api/clients/by-phone/:phoneNumber
- * البحث عن جميع العملاء برقم الهاتف (للمتابعة الديون)
+ * Upsert single client item
  */
-async function getClientsByPhone(req, res, next) {
+async function syncClient(clientData) {
+  const clientUuid = clientData.clientUuid || clientData.client_uuid || uuidv4();
+  const firestoreId = clientData.firestoreId || clientData.firestore_id || null;
+
+  const ownerFirebaseUid = normalizeOwnerFirebaseUid(
+    clientData.ownerFirebaseUid || clientData.owner_firebase_uid
+  );
+
+  // ✅ FIX: Always resolve owner_user_id from app_users by firebase_uid when possible
+  const ownerUserId = await resolveOwnerUserId(pool, {
+    ownerUserId: clientData.ownerUserId || clientData.owner_user_id,
+    ownerFirebaseUid
+  });
+
+  if (!ownerUserId) {
+    const err = new Error(
+      'ownerUserId/ownerFirebaseUid غير صالح. تأكد أن المستخدم (مالك البيانات) مسجل في PostgreSQL (app_users) وأنك ترسل ownerFirebaseUid الصحيح.'
+    );
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const fullName = safeTrim(clientData.fullName || clientData.full_name) || null;
+  const phone = normalizePhone(clientData.phone) || null;
+  const address = safeTrim(clientData.address) || null;
+  const notes = safeTrim(clientData.notes) || null;
+  const isActive = toDbBool(clientData.isActive ?? clientData.is_active ?? true);
+
+  const deviceId = parseDeviceId(clientData.deviceId || clientData.device_id) || null;
+
+  const createdAt = clientData.createdAt || clientData.created_at || Date.now();
+  const updatedAt = clientData.updatedAt || clientData.updated_at || Date.now();
+
+  const deletedAtVal = clientData.deletedAt || clientData.deleted_at || null;
+  const deletedAt = deletedAtVal ? toDbTimestamp(deletedAtVal) : null;
+
   try {
-    const { phoneNumber } = req.params;
-    const { ownerFirebaseUid, excludeOwnerId } = req.query;
+    // Find existing
+    const existing = await pool.query(
+      `
+      SELECT id, client_uuid, deleted_at
+      FROM business_clients
+      WHERE (client_uuid = $1)
+        AND owner_user_id = $2
+      LIMIT 1
+      `,
+      [clientUuid, ownerUserId]
+    );
 
-    if (!phoneNumber) {
-      return res.status(400).json({ success: false, error: 'phoneNumber مطلوب' });
+    if (existing.rowCount > 0) {
+      // Update
+      await pool.query(
+        `
+        UPDATE business_clients
+        SET
+          firestore_id = $1,
+          owner_firebase_uid = $2,
+          full_name = $3,
+          phone = $4,
+          address = $5,
+          notes = $6,
+          is_active = $7,
+          updated_at = to_timestamp($8 / 1000.0),
+          device_id = $9,
+          deleted_at = $10
+        WHERE client_uuid = $11 AND owner_user_id = $12
+        `,
+        [
+          firestoreId,
+          ownerFirebaseUid,
+          fullName,
+          phone,
+          address,
+          notes,
+          isActive,
+          updatedAt,
+          deviceId,
+          deletedAt,
+          clientUuid,
+          ownerUserId
+        ]
+      );
+
+      return deletedAt ? 'deleted' : 'updated';
     }
 
-    let query = `
-      SELECT * FROM business_clients
-      WHERE phone_number = $1
-        AND deleted_at IS NULL
-    `;
-    const params = [phoneNumber];
-    let paramIndex = 2;
+    // Insert
+    await pool.query(
+      `
+      INSERT INTO business_clients (
+        client_uuid,
+        firestore_id,
+        owner_user_id,
+        owner_firebase_uid,
+        full_name,
+        phone,
+        address,
+        notes,
+        is_active,
+        created_at,
+        updated_at,
+        device_id,
+        deleted_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        to_timestamp($10 / 1000.0),
+        to_timestamp($11 / 1000.0),
+        $12, $13
+      )
+      `,
+      [
+        clientUuid,
+        firestoreId,
+        ownerUserId,
+        ownerFirebaseUid,
+        fullName,
+        phone,
+        address,
+        notes,
+        isActive,
+        createdAt,
+        updatedAt,
+        deviceId,
+        deletedAt
+      ]
+    );
 
-    if (ownerFirebaseUid) {
-      query += ` AND owner_firebase_uid = $${paramIndex++}`;
-      params.push(ownerFirebaseUid);
+    return deletedAt ? 'deleted' : 'inserted';
+  } catch (err) {
+    // Better error mapping for FK issues
+    if (err && err.code === '23503') {
+      const e = new Error(
+        'فشل حفظ العميل بسبب مرجع غير موجود (Foreign Key). تأكد أن المستخدم مسجل في app_users وأن ownerFirebaseUid صحيح.'
+      );
+      e.statusCode = 400;
+      throw e;
     }
 
-    if (excludeOwnerId) {
-      query += ` AND owner_user_id != $${paramIndex++}`;
-      params.push(parseInt(excludeOwnerId, 10));
-    }
-
-    query += ' ORDER BY updated_at DESC, created_at DESC';
-
-    const result = await pool.query(query, params);
-    const clients = result.rows.map(row => mapClientToAPI(row));
-
-    res.json({ success: true, data: clients, count: clients.length });
-  } catch (error) {
-    next(error);
+    logger.error('syncClient error', { error: err.message, stack: err.stack });
+    const e = new Error('حدث خطأ أثناء مزامنة العميل');
+    e.statusCode = 500;
+    throw e;
   }
 }
 
 module.exports = {
   getClients,
-  getClientById,
-  createClient,
-  deleteClientByUuid,
-  syncClient,
-  getClientsByPhone
+  syncClients
 };
+
