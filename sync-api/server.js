@@ -594,8 +594,10 @@ app.put('/api/transactions/sync', optionalAuthenticate, syncLimiter, async (req,
         transactionData.accountFirestoreId
       );
 
-      if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
-        logger.info(`Creating shared main account with ownerUserId: ${ownerUserId}`);
+      // ✅ الصندوق المشترك الرئيسي يجب أن يكون واحداً فقط لكل النظام
+      // ولا يرتبط بمستخدم معيّن (owner_user_id يكون NULL)
+      if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1') {
+        logger.info(`Creating or reusing GLOBAL shared main account (not bound to specific ownerUserId)`);
         try {
           const sharedAccountUuid = '00000000-0000-0000-0000-000000000001';
           const now = Date.now();
@@ -614,13 +616,15 @@ app.put('/api/transactions/sync', optionalAuthenticate, syncLimiter, async (req,
               is_primary = EXCLUDED.is_primary,
               is_shared = EXCLUDED.is_shared,
               firestore_id = EXCLUDED.firestore_id,
+              owner_user_id = NULL,
+              owner_firebase_uid = NULL,
               updated_at = CURRENT_TIMESTAMP
             RETURNING account_id`,
             [
               sharedAccountUuid,
               'shared-main-account-v1',
-              ownerUserId,
-              transactionData.ownerFirebaseUid || null,
+              null, // ✅ لا نربطه بمستخدم معيّن
+              null,
               'الصندوق الرئيسي',
               true,
               true,
