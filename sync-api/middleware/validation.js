@@ -63,23 +63,27 @@ const validateLogin = [
  */
 const validateUser = [
   body('phone')
-    .optional()
-    .isMobilePhone('ar-IQ').withMessage('رقم الهاتف غير صحيح'),
+    // ✅ السماح بأن يكون الحقل غائباً أو null
+    .optional({ nullable: true })
+    // ✅ استخدام تحقق عام للأرقام بدلاً من isMobilePhone(ar-IQ)
+    // حتى يدعم أرقام دول مختلفة (6-15 رقم)
+    .matches(/^[0-9]{6,15}$/).withMessage('رقم الهاتف يجب أن يكون أرقام فقط (6-15 رقم)'),
   body('name')
-    .optional()
+    .optional({ nullable: true })
     .isLength({ min: 2, max: 255 }).withMessage('الاسم يجب أن يكون بين 2 و 255 حرف'),
   body('fullName')
-    .optional()
+    .optional({ nullable: true })
     .isLength({ min: 2, max: 255 }).withMessage('الاسم الكامل يجب أن يكون بين 2 و 255 حرف'),
   body('firebaseUid')
-    .optional()
+    .optional({ nullable: true })
     .isString().withMessage('firebaseUid يجب أن يكون نص')
     .isLength({ min: 1, max: 128 }).withMessage('firebaseUid يجب أن يكون بين 1 و 128 حرف'),
   body('userUuid')
-    .optional()
+    .optional({ nullable: true })
     .isUUID().withMessage('userUuid يجب أن يكون UUID صحيح'),
   body('accountNumber')
-    .optional()
+    // ✅ الحقل اختياري بالكامل، وإذا كان null نتجاوزه
+    .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('رقم الحساب يجب أن يكون رقم موجب'),
   validate
 ];
