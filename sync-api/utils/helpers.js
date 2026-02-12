@@ -221,9 +221,28 @@ async function getUserIdFromFirebaseUid(firebaseUid) {
 async function normalizeOwnerUserId(ownerUserId, ownerFirebaseUid) {
   logger.debug('normalizeOwnerUserId', { ownerUserId, ownerFirebaseUid });
   
-  // إذا كان ownerUserId موجوداً و Long، استخدمه
+  // إذا كان ownerUserId موجوداً ورقماً، تأكد أولاً أنه موجود في app_users
   if (ownerUserId && typeof ownerUserId === 'number') {
-    return ownerUserId;
+    try {
+      const checkResult = await pool.query(
+        'SELECT user_id FROM app_users WHERE user_id = $1 LIMIT 1',
+        [ownerUserId]
+      );
+      if (checkResult.rows.length > 0) {
+        return ownerUserId;
+      } else {
+        logger.warning('normalizeOwnerUserId: numeric ownerUserId not found in app_users, falling back to firebaseUid', {
+          ownerUserId,
+          ownerFirebaseUid
+        });
+      }
+    } catch (error) {
+      logger.warning('normalizeOwnerUserId: error checking numeric ownerUserId, falling back to firebaseUid', {
+        error: error.message,
+        ownerUserId,
+        ownerFirebaseUid
+      });
+    }
   }
   
   // إذا كان ownerUserId String (Firebase UID)، احصل على user_id من قاعدة البيانات
