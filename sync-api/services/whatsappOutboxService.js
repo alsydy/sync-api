@@ -7,7 +7,6 @@
 const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/database');
 const logger = require('../utils/logger');
-const { toE164 } = require('../utils/phone'); // ✅ add utils/phone.js in sync-api
 
 // Note: current DB schema uses columns:
 // id (uuid), to_phone, tries, max_tries, next_retry_at, next_attempt_at (nullable)
@@ -116,33 +115,6 @@ async function ensureTransactionStatusRow(transaction) {
   }
 }
 
-// ✅ store a useful error reason for debugging / UI
-async function setTransactionStatusError(transactionUuid, transactionId, errorCode) {
-  try {
-    await pool.query(
-      `
-      INSERT INTO whatsapp_transaction_status (
-        transaction_uuid,
-        transaction_id,
-        whatsapp_sent,
-        whatsapp_error,
-        whatsapp_error_at,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, FALSE, $3, NOW(), NOW(), NOW())
-      ON CONFLICT (transaction_uuid) DO UPDATE SET
-        whatsapp_sent = FALSE,
-        whatsapp_error = EXCLUDED.whatsapp_error,
-        whatsapp_error_at = EXCLUDED.whatsapp_error_at,
-        updated_at = NOW()
-      `,
-      [transactionUuid, transactionId || null, errorCode]
-    );
-  } catch (_) {
-    // ignore
-  }
-}
-
 async function enqueueWhatsAppOutboxForTransaction(transaction) {
   const tUuid = transaction?.transaction_uuid;
   const tId = transaction?.transaction_id;
@@ -152,7 +124,7 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   if (!tUuid || !ownerUserId || !clientId) return { enqueued: false, reason: 'missing-fields' };
 
   // احترام notify_customer أيضاً لتجنب إرسال غير مقصود
-  if (transaction.notify_customer !== true && transaction.notify_customer !== 1) {
+  if (transaction.notify_customer !== true) {
     return { enqueued: false, reason: 'notify_customer_disabled' };
   }
 
@@ -162,20 +134,14 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   const optedOut = await isClientOptedOut(ownerUserId, clientId);
   if (optedOut) return { enqueued: false, reason: 'client_opted_out' };
 
-  // ✅ Idempotency: avoid duplicate ACTIVE outbox for same transaction_uuid
+  // Idempotency: avoid duplicate outbox for same transaction_uuid
   try {
     const exists = await pool.query(
-      `
-      SELECT id, status
-      FROM whatsapp_outbox
-      WHERE transaction_uuid = $1
-        AND status IN ('pending','retry','processing')
-      LIMIT 1
-      `,
+      'SELECT 1 FROM whatsapp_outbox WHERE transaction_uuid = $1 LIMIT 1',
       [tUuid]
     );
     if (exists.rows.length > 0) {
-      return { enqueued: false, reason: 'already_active', outboxId: exists.rows[0].id };
+      return { enqueued: false, reason: 'already_exists' };
     }
   } catch (e) {
     // إذا لم يدعم الجدول/العمود، نكمل بمحاولة insert (وسنلتقط الخطأ)
@@ -185,28 +151,17 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   let clientPhone = null;
   try {
     const c = await pool.query(
-      'SELECT client_name, phone_number FROM business_clients WHERE client_id = $1 AND deleted_at IS NULL LIMIT 1',
+      'SELECT client_name, phone_number FROM business_clients WHERE client_id = $1 LIMIT 1',
       [clientId]
     );
     customerName = c.rows?.[0]?.client_name || null;
     clientPhone = c.rows?.[0]?.phone_number || null;
-  } catch (e) {
-    logger.warning('Failed to lookup business_clients for WhatsApp', { clientId, error: e?.message });
-  }
+  } catch (_) {}
 
   // Enforce client phone source (no owner/user phone fallback).
   if (!clientPhone) {
     await ensureTransactionStatusRow(transaction);
-    await setTransactionStatusError(tUuid, tId, 'missing_client_phone');
     return { enqueued: false, reason: 'missing_client_phone' };
-  }
-
-  // ✅ Normalize phone BEFORE inserting to outbox
-  const e164 = toE164(clientPhone, process.env.DEFAULT_PHONE_COUNTRY || 'YE');
-  if (!e164) {
-    await ensureTransactionStatusRow(transaction);
-    await setTransactionStatusError(tUuid, tId, 'invalid_phone_input');
-    return { enqueued: false, reason: 'invalid_phone' };
   }
 
   const msg = buildMessage({
@@ -240,16 +195,16 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
         updated_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       `,
-      [outboxId, ownerUserId, clientId, tUuid, tId || null, e164, msg, maxTries]
+      [outboxId, ownerUserId, clientId, tUuid, tId || null, clientPhone, msg, maxTries]
     );
   } catch (e) {
-    logger.warning('Failed to insert whatsapp_outbox', {
+    logger.warning('Failed to insert whatsapp_outbox (schema may differ)', {
       outboxId,
       transactionUuid: tUuid,
       error: e?.message
     });
+    // still ensure status row
     await ensureTransactionStatusRow(transaction);
-    await setTransactionStatusError(tUuid, tId, 'outbox_insert_failed');
     return { enqueued: false, reason: 'insert_failed' };
   }
 
