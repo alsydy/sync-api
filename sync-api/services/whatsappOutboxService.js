@@ -61,18 +61,32 @@ function formatDate(d) {
   }
 }
 
-function buildMessage({ customerName, amount, currency, direction, note, dateStr }) {
+function formatAmount(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return String(val ?? '');
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(2);
+}
+
+function formatBalancesLines(balances) {
+  if (!Array.isArray(balances) || balances.length === 0) return ['-'];
+  return balances.map((b) => `${b.currency}: ${formatAmount(b.balance)}`);
+}
+
+function buildMessage({ customerName, amount, currency, direction, note, dateStr, balances, senderName }) {
   const dir = String(direction || '').toLowerCase();
   const typeLabel =
     dir === 'income' || dir === 'credit' ? '📈 القيد لكم' :
     dir === 'expense' || dir === 'debit' ? '📉 القيد عليكم' :
-    '🏦 القيد المالي';
+    '📊 القيد';
 
-  const safeName = customerName || 'العميل';
-  const safeAmount = amount != null ? amount : 0;
+  const safeName = customerName || 'عميلنا';
+  const safeAmount = formatAmount(amount != null ? amount : 0);
   const safeCurrency = currency || 'IQD';
   const safeNote = (note && String(note).trim()) ? String(note).trim() : '-';
   const safeDate = dateStr || 'غير محدد';
+  const safeSender = senderName || '-';
+  const balanceLines = formatBalancesLines(balances).join('\n');
 
   return (
 `👋 مرحبًا ${safeName}،
@@ -85,10 +99,58 @@ ${typeLabel}
 📅 التاريخ: ${safeDate}
 📋 ملاحظة: ${safeNote}
 ────────────────
-
-⚖️ شكراً لإدارة حساباتكم بدقة واحترافية.`
+💹 إجمالي الرصيد لكل عملة:
+${balanceLines}
+────────────────
+⚖️ شكراً لإدارة حساباتكم بدقة واحترافية.
+📝 تم الإرسال بواسطة:${safeSender}`
   );
 }
+
+async function getOwnerName(userId) {
+  try {
+    const r = await pool.query(
+      'SELECT full_name FROM app_users WHERE user_id = $1 AND deleted_at IS NULL LIMIT 1',
+      [userId]
+    );
+    return r.rows?.[0]?.full_name || null;
+  } catch (e) {
+    logger.warning('Owner name lookup failed', { userId, error: e?.message });
+    return null;
+  }
+}
+
+async function getClientBalances(ownerUserId, clientId) {
+  try {
+    const r = await pool.query(
+      `
+      SELECT
+        currency_code,
+        SUM(
+          CASE
+            WHEN transaction_direction IN ('expense','debit','DEBIT') THEN -transaction_amount
+            ELSE transaction_amount
+          END
+        ) AS balance
+      FROM financial_transactions
+      WHERE owner_user_id = $1
+        AND client_id = $2
+        AND deleted_at IS NULL
+      GROUP BY currency_code
+      ORDER BY currency_code
+      `,
+      [ownerUserId, clientId]
+    );
+    return r.rows.map((row) => ({
+      currency: row.currency_code,
+      balance: row.balance
+    }));
+  } catch (e) {
+    logger.warning('Client balances lookup failed', { ownerUserId, clientId, error: e?.message });
+    return [];
+  }
+}
+
 
 async function ensureTransactionStatusRow(transaction) {
   try {
@@ -164,13 +226,20 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     return { enqueued: false, reason: 'missing_client_phone' };
   }
 
+  const [ownerName, balances] = await Promise.all([
+    getOwnerName(ownerUserId),
+    getClientBalances(ownerUserId, clientId)
+  ]);
+
   const msg = buildMessage({
     customerName,
     amount: transaction.transaction_amount,
     currency: transaction.currency_code,
     direction: transaction.transaction_direction,
     note: transaction.transaction_note,
-    dateStr: formatDate(transaction.transaction_date || transaction.created_at || Date.now())
+    dateStr: formatDate(transaction.transaction_date || transaction.created_at || Date.now()),
+    balances,
+    senderName: ownerName
   });
 
   const outboxId = uuidv4();
