@@ -374,68 +374,84 @@ async function syncTransaction(req, res, next) {
 
       // تحديث المعاملة الموجودة
       const result = await pool.query(
-        `UPDATE financial_transactions SET
-          cloud_id = COALESCE($2, cloud_id),
-          firestore_id = COALESCE($3, firestore_id),
-          owner_user_id = $4,
-          owner_firebase_uid = COALESCE($5, owner_firebase_uid),
-          client_id = $6,
-          account_id = $7,
-          client_firestore_id = COALESCE($8, client_firestore_id),
-          account_firestore_id = COALESCE($9, account_firestore_id),
-          transaction_amount = $10,
-          currency_code = $11,
-          transaction_direction = $12,
-          transaction_note = COALESCE($13, transaction_note),
-          transaction_date = to_timestamp($14),
-          notify_customer = $15,
-          is_synced = COALESCE($16, is_synced),
-          device_id = COALESCE($17, device_id),
-          transaction_number = COALESCE($18, transaction_number),
-          sync_version = COALESCE($19, sync_version) + 1,
+        `
+        INSERT INTO financial_transactions (
+          transaction_uuid, cloud_id, firestore_id, owner_user_id, owner_firebase_uid,
+          client_id, account_id, client_firestore_id, account_firestore_id,
+          transaction_amount, currency_code, transaction_direction, transaction_note, transaction_date,
+          notify_customer, is_synced, device_id, transaction_number, sync_version,
+          created_at, updated_at,
+          entry_type, transfer_company, transfer_recipient, transfer_sender, transfer_number,
+          fee_amount, fee_currency, center_fee_amount, center_fee_currency
+        ) VALUES (
+          $1, $2, $3, $4, $5,
+          $6, $7, $8, $9,
+          $10, $11, $12, $13, to_timestamp($14),
+          $15, $16, $17, $18, $19,
+          to_timestamp($20), CURRENT_TIMESTAMP,
+          $21, $22, $23, $24, $25,
+          $26, $27, $28, $29
+        )
+        ON CONFLICT (transaction_uuid) DO UPDATE SET
+          cloud_id = COALESCE(EXCLUDED.cloud_id, financial_transactions.cloud_id),
+          firestore_id = COALESCE(EXCLUDED.firestore_id, financial_transactions.firestore_id),
+          owner_user_id = EXCLUDED.owner_user_id,
+          owner_firebase_uid = COALESCE(EXCLUDED.owner_firebase_uid, financial_transactions.owner_firebase_uid),
+          client_id = EXCLUDED.client_id,
+          account_id = EXCLUDED.account_id,
+          client_firestore_id = COALESCE(EXCLUDED.client_firestore_id, financial_transactions.client_firestore_id),
+          account_firestore_id = COALESCE(EXCLUDED.account_firestore_id, financial_transactions.account_firestore_id),
+          transaction_amount = EXCLUDED.transaction_amount,
+          currency_code = EXCLUDED.currency_code,
+          transaction_direction = EXCLUDED.transaction_direction,
+          transaction_note = COALESCE(EXCLUDED.transaction_note, financial_transactions.transaction_note),
+          transaction_date = EXCLUDED.transaction_date,
+          notify_customer = EXCLUDED.notify_customer,
+          is_synced = COALESCE(EXCLUDED.is_synced, financial_transactions.is_synced),
+          device_id = COALESCE(EXCLUDED.device_id, financial_transactions.device_id),
+          transaction_number = COALESCE(EXCLUDED.transaction_number, financial_transactions.transaction_number),
+          -- مهم: حتى لا ينقص sync_version عند مزامنة قديمة
+          sync_version = GREATEST(
+            COALESCE(financial_transactions.sync_version, 0),
+            COALESCE(EXCLUDED.sync_version, 0)
+          ) + 1,
           updated_at = CURRENT_TIMESTAMP,
-          entry_type = COALESCE($20, entry_type),
-          transfer_company = COALESCE($21, transfer_company),
-          transfer_recipient = COALESCE($22, transfer_recipient),
-          transfer_sender = COALESCE($23, transfer_sender),
-          transfer_number = COALESCE($24, transfer_number),
-          fee_amount = COALESCE($25, fee_amount),
-          fee_currency = COALESCE($26, fee_currency),
-          center_fee_amount = COALESCE($27, center_fee_amount),
-          center_fee_currency = COALESCE($28, center_fee_currency)
-        WHERE transaction_uuid = $1 AND deleted_at IS NULL
-        RETURNING *`,
+          deleted_at = NULL
+        RETURNING *
+        `,
         [
           uuid,
-          transactionData.cloudId,
-          transactionData.firestoreId,
+          transactionData.cloudId || null,
+          transactionData.firestoreId || null,
           ownerUserId,
-          transactionData.ownerFirebaseUid,
+          transactionData.ownerFirebaseUid || null,
           clientId,
           accountId,
-          transactionData.customerFirestoreId || transactionData.clientFirestoreId,
-          transactionData.accountFirestoreId,
+          transactionData.customerFirestoreId || transactionData.clientFirestoreId || null,
+          transactionData.accountFirestoreId || null,
           transactionData.amount || transactionData.transactionAmount,
           transactionData.currency || transactionData.currencyCode || 'IQD',
           normalizeTransactionDirection(transactionData.direction || transactionData.transactionDirection),
-          transactionData.note || transactionData.transactionNote,
-          msToSeconds(transactionData.transactionDate),
+          transactionData.note || transactionData.transactionNote || null,
+          msToSeconds(transactionData.transactionDate || Date.now()),
           intToBoolean(notifyCustomerServer),
-          intToBoolean(transactionData.synced),
-          transactionData.deviceId,
-          transactionData.transactionNumber,
-          transactionData.syncVersion || existingTransaction.sync_version || 0,
-          transactionData.entryType ?? null,
-          transactionData.transferCompany ?? null,
-          transactionData.transferRecipient ?? null,
-          transactionData.transferSender ?? null,
-          transactionData.transferNumber ?? null,
+          intToBoolean(transactionData.synced !== undefined ? transactionData.synced : 1),
+          transactionData.deviceId || null,
+          transactionData.transactionNumber || null,
+          transactionData.syncVersion || 1,
+          msToSeconds(transactionData.createdAt || Date.now()),
+          transactionData.entryType || null,
+          transactionData.transferCompany || null,
+          transactionData.transferRecipient || null,
+          transactionData.transferSender || null,
+          transactionData.transferNumber || null,
           transactionData.feeAmount != null ? transactionData.feeAmount : null,
-          transactionData.feeCurrency ?? null,
+          transactionData.feeCurrency || null,
           transactionData.centerFeeAmount != null ? transactionData.centerFeeAmount : null,
-          transactionData.centerFeeCurrency ?? null
+          transactionData.centerFeeCurrency || null
         ]
       );
+
 
       const transaction = result.rows[0];
 
@@ -1081,4 +1097,5 @@ module.exports = {
   getDebtSummary, // ✅ ملخص "من سجّل عليّ"
   getDebtDetails  // ✅ تفاصيل القيود عند الضغط
 };
+
 
