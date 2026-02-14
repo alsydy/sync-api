@@ -32,6 +32,56 @@ function requireBoolean(value, name) {
 }
 
 // ----------------------------------------------------------------------------
+// Dynamic base-url helpers (Option C)
+// ----------------------------------------------------------------------------
+
+function getRequestBaseUrl(req) {
+  // trust proxy = true في السيرفر الرئيسي، لذلك ندعم X-Forwarded-*
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http')
+    .split(',')[0]
+    .trim();
+
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim();
+
+  // قد يكون host فاضي في حالات نادرة جدًا
+  if (!host) return `${proto}://localhost`;
+
+  return `${proto}://${host}`;
+}
+
+function withPort(baseUrl, newPort) {
+  try {
+    const u = new URL(baseUrl);
+    u.port = String(newPort);
+    // إزالة / في النهاية إن وجدت
+    return u.toString().replace(/\/+$/, '');
+  } catch (_) {
+    // fallback بسيط: حذف أي بورت وإضافة الجديد
+    const clean = String(baseUrl || '').replace(/\/+$/, '');
+    return clean.replace(/:\d+$/, '') + `:${newPort}`;
+  }
+}
+
+/**
+ * يحدد base URL لخادم الواتساب:
+ * - إذا WHATSAPP_API_BASE_URL موجود => يستخدمه
+ * - غير ذلك => يأخذ host من نفس الطلب للـ Sync API ويغيّر المنفذ إلى 3102
+ */
+function getWhatsappPublicBaseUrl(req) {
+  const envBaseRaw = (process.env.WHATSAPP_API_BASE_URL || '').trim();
+  if (envBaseRaw) {
+    return envBaseRaw.replace(/\/+$/, '');
+  }
+
+  const whatsappPort = Number(process.env.WHATSAPP_API_PORT || 3102);
+  const reqBase = getRequestBaseUrl(req);
+
+  return withPort(reqBase, whatsappPort);
+}
+
+// ----------------------------------------------------------------------------
 // Settings
 // ----------------------------------------------------------------------------
 
@@ -118,10 +168,7 @@ async function setClientOptOut(req, res, next) {
       return res.json({ success: true, data: { userId, clientId, optedOut: false } });
     }
 
-    // ✅ Schema-compatible:
-    // - Some DBs have (user_id, client_id) unique + opted_out boolean
-    // - Your DB snapshot shows table with columns: id, user_id, client_id, created_at (no opted_out)
-    // In that case, simply inserting the row means "opted out".
+    // ✅ Schema-compatible fallback
     try {
       await pool.query(
         `
@@ -143,7 +190,7 @@ async function setClientOptOut(req, res, next) {
           [userId, clientId]
         );
       } catch (e2) {
-        // if duplicate key exists on (user_id, client_id) just treat as success
+        // duplicate -> treat as success
       }
     }
 
@@ -160,7 +207,6 @@ async function setClientOptOut(req, res, next) {
 async function getClientOptOuts(req, res, next) {
   try {
     const userId = requireInt(req.params.userId, 'userId');
-    // Schema in your DB has no opted_out/is_opted_out; presence of a row means opted-out.
     const r = await pool.query(
       'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1',
       [userId]
@@ -194,6 +240,7 @@ async function createPrivateSessionRequest(req, res, next) {
     const tokenHash = sha256Hex(token);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const sessionId = `user_${userId}`; // DB: session_id NOT NULL
+
     // ✅ IMPORTANT: في DB لديك request_id قد يكون BIGINT (Auto Increment)
     // لذلك لا نمرّر UUID. ندع DB يولد request_id ثم نعيده إن لزم.
     let insertedRequestId = null;
@@ -216,7 +263,7 @@ async function createPrivateSessionRequest(req, res, next) {
       );
       insertedRequestId = ins.rows?.[0]?.request_id ?? null;
     } catch (e) {
-      // fallback: بعض المخططات قد تكون request_id نصي (نادر) — حاول بالـUUID فقط إذا فشل الإدراج بدون request_id
+      // fallback: بعض المخططات قد تكون request_id نصي (نادر)
       const requestId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
       const ins2 = await pool.query(
         `
@@ -238,23 +285,18 @@ async function createPrivateSessionRequest(req, res, next) {
       insertedRequestId = ins2.rows?.[0]?.request_id ?? null;
     }
 
-    const baseRaw = (process.env.WHATSAPP_API_BASE_URL || '').trim();
-    const base = baseRaw.replace(/\/+$/, '');
-    if (!base) {
-      // لا نرجّع رابط خاطئ. هذا يؤدي لضياع وقت على العميل.
-      logger.errorMsg('WHATSAPP_API_BASE_URL is not configured', { userId, requestId: insertedRequestId });
-      return res.status(500).json({
-        success: false,
-        error: 'WHATSAPP_API_BASE_URL is not configured on sync-api'
-      });
-    }
-    const sessionUrl = `${base}/session/${token}`;
+    // ✅ Option C: ديناميكي حسب الشبكة اللي جاء منها الطلب
+    // إذا WHATSAPP_API_BASE_URL موجود، سيُستخدم كـ Override
+    const base = getWhatsappPublicBaseUrl(req);
+    const sessionUrl = `${base}/session/${encodeURIComponent(token)}`;
 
     logger.info('WhatsApp private session request created', {
       userId,
       requestId: insertedRequestId,
       sessionId,
-      expiresAt: expiresAt.toISOString()
+      expiresAt: expiresAt.toISOString(),
+      base,
+      sessionUrl
     });
 
     res.json({ success: true, data: { session_url: sessionUrl, request_id: insertedRequestId } });
