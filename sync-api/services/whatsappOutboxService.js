@@ -73,7 +73,116 @@ function formatBalancesLines(balances) {
   return balances.map((b) => `${b.currency}: ${formatAmount(b.balance)}`);
 }
 
-function buildMessage({ customerName, amount, currency, direction, note, dateStr, balances, senderName }) {
+function safeText(val, fallback = '-') {
+  const s = val == null ? '' : String(val).trim();
+  return s ? s : fallback;
+}
+
+function currencyName(code) {
+  const c = String(code || '').toUpperCase();
+  const map = {
+    YER: 'ريال يمني',
+    SAR: 'ريال سعودي',
+    USD: 'دولار أمريكي',
+    IQD: 'دينار عراقي'
+  };
+  return map[c] || c || 'غير محدد';
+}
+
+function isTransferEntry({ entryType, transferCompany, transferRecipient, transferSender, transferNumber }) {
+  const type = String(entryType || '').toLowerCase();
+  if (type.includes('transfer') || type.includes('حوال') || type.includes('hawala')) return true;
+  return !!(transferCompany || transferRecipient || transferSender || transferNumber);
+}
+
+function buildTransferMessage({
+  customerName,
+  amount,
+  currency,
+  direction,
+  dateStr,
+  transferCompany,
+  transferRecipient,
+  transferSender,
+  transferNumber,
+  feeAmount,
+  feeCurrency
+}) {
+  const dir = String(direction || '').toLowerCase();
+  const isSend = dir === 'expense' || dir === 'debit';
+  const title = isSend ? 'إرسال حوالة' : 'إستلام حوالة';
+
+  const safeName = safeText(customerName, 'عميلنا');
+  const safeCurrency = String(currency || 'IQD').toUpperCase();
+  const feeCur = String(feeCurrency || '').toUpperCase();
+  const amountNum = Number(amount);
+  const feeNum = Number(feeAmount);
+  const hasFeeSameCurrency = Number.isFinite(feeNum) && feeNum > 0 && feeCur && feeCur === safeCurrency;
+  const totalAmount = Number.isFinite(amountNum) ? (hasFeeSameCurrency ? amountNum + feeNum : amountNum) : 0;
+  const transferAmount = Number.isFinite(amountNum) ? amountNum : 0;
+
+  const firstLine =
+    (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
+    ` ${formatAmount(totalAmount)} ${safeCurrency}` +
+    (hasFeeSameCurrency ? `. العمولة: ${formatAmount(feeNum)} ${safeCurrency}` : '');
+
+  const company = safeText(transferCompany, 'غير محدد');
+  const recipient = safeText(transferRecipient, 'غير محدد');
+  const sender = safeText(transferSender, 'غير محدد');
+  const number = safeText(transferNumber, 'غير محدد');
+  const dateLine = safeText(dateStr, 'غير محدد');
+
+  return (
+`👋 مرحبًا ${safeName}،
+
+📣 ${title}
+
+────────────────
+${firstLine}
+مقابل تحويل حوالة من حسابكم لدينا إلى: ${company}
+مبلغ الحوالة: ${formatAmount(transferAmount)}
+عملة الحوالة: ${currencyName(safeCurrency)}
+المستلم: ${recipient}
+المرسل: ${sender}
+رقم الحوالة: ${number}
+التاريخ: ${dateLine}
+────────────────`
+  );
+}
+
+function buildMessage({
+  customerName,
+  amount,
+  currency,
+  direction,
+  note,
+  dateStr,
+  balances,
+  senderName,
+  entryType,
+  transferCompany,
+  transferRecipient,
+  transferSender,
+  transferNumber,
+  feeAmount,
+  feeCurrency
+}) {
+  if (isTransferEntry({ entryType, transferCompany, transferRecipient, transferSender, transferNumber })) {
+    return buildTransferMessage({
+      customerName,
+      amount,
+      currency,
+      direction,
+      dateStr,
+      transferCompany,
+      transferRecipient,
+      transferSender,
+      transferNumber,
+      feeAmount,
+      feeCurrency
+    });
+  }
+
   const dir = String(direction || '').toLowerCase();
   const typeLabel =
     dir === 'income' || dir === 'credit' ? '📈 القيد لكم' :
@@ -239,7 +348,14 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     note: transaction.transaction_note,
     dateStr: formatDate(transaction.transaction_date || transaction.created_at || Date.now()),
     balances,
-    senderName: ownerName
+    senderName: ownerName,
+    entryType: transaction.entry_type,
+    transferCompany: transaction.transfer_company,
+    transferRecipient: transaction.transfer_recipient,
+    transferSender: transaction.transfer_sender,
+    transferNumber: transaction.transfer_number,
+    feeAmount: transaction.fee_amount,
+    feeCurrency: transaction.fee_currency
   });
 
   const outboxId = uuidv4();
