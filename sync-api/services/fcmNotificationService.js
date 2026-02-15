@@ -18,15 +18,48 @@ function formatAmount(val) {
   return n.toFixed(2);
 }
 
+function formatAmountPretty(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return String(val ?? '');
+  const hasDecimals = Math.abs(n % 1) > 0;
+  try {
+    return new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: hasDecimals ? 2 : 0,
+      maximumFractionDigits: hasDecimals ? 2 : 0
+    }).format(n);
+  } catch (_) {
+    return hasDecimals ? n.toFixed(2) : String(n);
+  }
+}
+
 function currencyName(code) {
   const c = String(code || '').toUpperCase();
   const map = {
     YER: 'ريال يمني',
-    SAR: 'ريال سعودي',
+    SAR: 'سعودي',
     USD: 'دولار أمريكي',
     IQD: 'دينار عراقي'
   };
   return map[c] || c || 'غير محدد';
+}
+
+function formatDateTime(d) {
+  try {
+    const date = d instanceof Date ? d : new Date(d);
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    const h24 = date.getHours();
+    const suffix = h24 >= 12 ? 'م' : 'ص';
+    let h12 = h24 % 12;
+    if (h12 === 0) h12 = 12;
+    const hh = String(h12).padStart(2, '0');
+    const min = String(date.getMinutes()).padStart(2, '0');
+    const sec = String(date.getSeconds()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}:${sec} ${suffix}`;
+  } catch (_) {
+    return 'غير محدد';
+  }
 }
 
 function isTransferEntry(tx) {
@@ -154,34 +187,38 @@ async function sendTransactionNotification(transaction, customer, owner) {
 
     if (isTransferEntry(transaction)) {
       const isSend = isDebit;
-      notificationTitle = isSend ? 'إرسال حوالة' : 'إستلام حوالة';
+      notificationTitle = isSend ? '(إرسال حوالة)' : '(إستلام حوالة)';
 
       const feeAmount = Number(transaction.fee_amount);
       const feeCurrency = String(transaction.fee_currency || '').toUpperCase();
-      const hasFeeSameCurrency = Number.isFinite(feeAmount) && feeAmount > 0 && feeCurrency && feeCurrency === currency;
-      const totalAmount = Number.isFinite(amount) ? (hasFeeSameCurrency ? amount + feeAmount : amount) : 0;
-      const transferAmount = Number.isFinite(amount) ? amount : 0;
+      const hasFee = Number.isFinite(feeAmount) && feeAmount > 0;
+      const amountText = formatAmountPretty(amount);
+      const feeText = formatAmountPretty(feeAmount);
 
       const firstLine =
         (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
-        ` ${formatAmount(totalAmount)} ${currency}` +
-        (hasFeeSameCurrency ? `. العمولة: ${formatAmount(feeAmount)} ${currency}` : '');
+        ` ${amountText} ${currencyName(currency)}` +
+        (hasFee ? `  العمولة: ${feeText} ${currencyName(feeCurrency || currency)}` : '');
 
       const company = transaction.transfer_company || 'غير محدد';
       const recipient = transaction.transfer_recipient || 'غير محدد';
       const sender = transaction.transfer_sender || 'غير محدد';
       const number = transaction.transfer_number || 'غير محدد';
-      const dateLine = transaction.transaction_date ? new Date(transaction.transaction_date).toLocaleDateString('ar-EG') : 'غير محدد';
+      const dateLine = formatDateTime(transaction.transaction_date || transaction.created_at || Date.now());
+      const advisory = isSend ? '\nعميلنا العزيز عند إرسالك حوالة احرص \nعلى إبلاغ المستفيد باستلامها' : '';
 
       notificationBody = [
+        notificationTitle,
         firstLine,
-        `مقابل تحويل حوالة من حسابكم لدينا إلى: ${company}`,
-        `مبلغ الحوالة: ${formatAmount(transferAmount)}`,
+        '',
+        `مقابل ${isSend ? 'تحويل حوالة من حسابكم لدينا إلى' : 'حوالة واردة عن طريق'}: ${company}`,
+        `مبلغ الحوالة: ${amountText}`,
         `عملة الحوالة: ${currencyName(currency)}`,
         `المستلم: ${recipient}`,
         `المرسل: ${sender}`,
         `رقم الحوالة: ${number}`,
-        `التاريخ: ${dateLine}`
+        '',
+        `${dateLine}${advisory}`
       ].join('\n');
     }
     
