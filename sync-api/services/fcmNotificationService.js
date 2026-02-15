@@ -11,6 +11,30 @@ const logger = require('../utils/logger');
 // تهيئة Firebase Admin SDK (يجب إضافة credentials)
 let isInitialized = false;
 
+function formatAmount(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return String(val ?? '');
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(2);
+}
+
+function currencyName(code) {
+  const c = String(code || '').toUpperCase();
+  const map = {
+    YER: 'ريال يمني',
+    SAR: 'ريال سعودي',
+    USD: 'دولار أمريكي',
+    IQD: 'دينار عراقي'
+  };
+  return map[c] || c || 'غير محدد';
+}
+
+function isTransferEntry(tx) {
+  const type = String(tx?.entry_type || '').toLowerCase();
+  if (type.includes('transfer') || type.includes('حوال') || type.includes('hawala')) return true;
+  return !!(tx?.transfer_company || tx?.transfer_recipient || tx?.transfer_sender || tx?.transfer_number);
+}
+
 function initializeFirebase() {
   if (isInitialized) return;
   
@@ -118,16 +142,48 @@ async function sendTransactionNotification(transaction, customer, owner) {
     // ✅ قاعدة البيانات تحفظ income/expense، لكن نحتاج DEBIT/CREDIT للإشعار
     const direction = transaction.transaction_direction;
     const isDebit = direction === 'expense' || direction === 'DEBIT';
-    const directionText = isDebit ? 'مدين' : 'دائن';
     const directionCode = isDebit ? 'DEBIT' : 'CREDIT';
-    
+
     const amount = parseFloat(transaction.transaction_amount);
-    const currency = transaction.currency_code || 'IQD';
+    const currency = String(transaction.currency_code || 'IQD').toUpperCase();
     const ownerName = owner?.full_name || owner?.name || 'مستخدم';
     const customerName = customer?.client_name || 'عميل';
-    
-    const notificationTitle = `قيد جديد من ${ownerName}`;
-    const notificationBody = `${directionText}: ${amount} ${currency}${transaction.transaction_note ? ` - ${transaction.transaction_note}` : ''}`;
+
+    let notificationTitle = `قيد جديد من ${ownerName}`;
+    let notificationBody = `${isDebit ? 'مدين' : 'دائن'}: ${amount} ${currency}${transaction.transaction_note ? ` - ${transaction.transaction_note}` : ''}`;
+
+    if (isTransferEntry(transaction)) {
+      const isSend = isDebit;
+      notificationTitle = isSend ? 'إرسال حوالة' : 'إستلام حوالة';
+
+      const feeAmount = Number(transaction.fee_amount);
+      const feeCurrency = String(transaction.fee_currency || '').toUpperCase();
+      const hasFeeSameCurrency = Number.isFinite(feeAmount) && feeAmount > 0 && feeCurrency && feeCurrency === currency;
+      const totalAmount = Number.isFinite(amount) ? (hasFeeSameCurrency ? amount + feeAmount : amount) : 0;
+      const transferAmount = Number.isFinite(amount) ? amount : 0;
+
+      const firstLine =
+        (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
+        ` ${formatAmount(totalAmount)} ${currency}` +
+        (hasFeeSameCurrency ? `. العمولة: ${formatAmount(feeAmount)} ${currency}` : '');
+
+      const company = transaction.transfer_company || 'غير محدد';
+      const recipient = transaction.transfer_recipient || 'غير محدد';
+      const sender = transaction.transfer_sender || 'غير محدد';
+      const number = transaction.transfer_number || 'غير محدد';
+      const dateLine = transaction.transaction_date ? new Date(transaction.transaction_date).toLocaleDateString('ar-EG') : 'غير محدد';
+
+      notificationBody = [
+        firstLine,
+        `مقابل تحويل حوالة من حسابكم لدينا إلى: ${company}`,
+        `مبلغ الحوالة: ${formatAmount(transferAmount)}`,
+        `عملة الحوالة: ${currencyName(currency)}`,
+        `المستلم: ${recipient}`,
+        `المرسل: ${sender}`,
+        `رقم الحوالة: ${number}`,
+        `التاريخ: ${dateLine}`
+      ].join('\n');
+    }
     
     const message = {
       notification: {
@@ -146,6 +202,13 @@ async function sendTransactionNotification(transaction, customer, owner) {
         ownerFirebaseUid: transaction.owner_firebase_uid || '',
         ownerName: ownerName,
         note: transaction.transaction_note || '',
+        entryType: transaction.entry_type || '',
+        transferCompany: transaction.transfer_company || '',
+        transferRecipient: transaction.transfer_recipient || '',
+        transferSender: transaction.transfer_sender || '',
+        transferNumber: transaction.transfer_number || '',
+        feeAmount: transaction.fee_amount != null ? String(transaction.fee_amount) : '',
+        feeCurrency: transaction.fee_currency || '',
         timestamp: new Date().toISOString()
       },
       tokens: customerTokens.rows.map(row => row.token),
