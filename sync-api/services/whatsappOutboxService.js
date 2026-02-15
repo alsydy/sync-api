@@ -61,11 +61,44 @@ function formatDate(d) {
   }
 }
 
+function formatDateTime(d) {
+  try {
+    const date = d instanceof Date ? d : new Date(d);
+    const dd = String(date.getDate()).padStart(2, '0');
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const yyyy = date.getFullYear();
+    const h24 = date.getHours();
+    const suffix = h24 >= 12 ? 'م' : 'ص';
+    let h12 = h24 % 12;
+    if (h12 === 0) h12 = 12;
+    const hh = String(h12).padStart(2, '0');
+    const min = String(date.getMinutes()).padStart(2, '0');
+    const sec = String(date.getSeconds()).padStart(2, '0');
+    return `${dd}/${mm}/${yyyy} ${hh}:${min}:${sec} ${suffix}`;
+  } catch (_) {
+    return 'غير محدد';
+  }
+}
+
 function formatAmount(val) {
   const n = Number(val);
   if (!Number.isFinite(n)) return String(val ?? '');
   if (Number.isInteger(n)) return String(n);
   return n.toFixed(2);
+}
+
+function formatAmountPretty(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return String(val ?? '');
+  const hasDecimals = Math.abs(n % 1) > 0;
+  try {
+    return new Intl.NumberFormat('en-US', {
+      minimumFractionDigits: hasDecimals ? 2 : 0,
+      maximumFractionDigits: hasDecimals ? 2 : 0
+    }).format(n);
+  } catch (_) {
+    return hasDecimals ? n.toFixed(2) : String(n);
+  }
 }
 
 function formatBalancesLines(balances) {
@@ -82,7 +115,7 @@ function currencyName(code) {
   const c = String(code || '').toUpperCase();
   const map = {
     YER: 'ريال يمني',
-    SAR: 'ريال سعودي',
+    SAR: 'سعودي',
     USD: 'دولار أمريكي',
     IQD: 'دينار عراقي'
   };
@@ -100,7 +133,7 @@ function buildTransferMessage({
   amount,
   currency,
   direction,
-  dateStr,
+  dateValue,
   transferCompany,
   transferRecipient,
   transferSender,
@@ -112,41 +145,43 @@ function buildTransferMessage({
   const isSend = dir === 'expense' || dir === 'debit';
   const title = isSend ? 'إرسال حوالة' : 'إستلام حوالة';
 
-  const safeName = safeText(customerName, 'عميلنا');
   const safeCurrency = String(currency || 'IQD').toUpperCase();
   const feeCur = String(feeCurrency || '').toUpperCase();
   const amountNum = Number(amount);
   const feeNum = Number(feeAmount);
-  const hasFeeSameCurrency = Number.isFinite(feeNum) && feeNum > 0 && feeCur && feeCur === safeCurrency;
-  const totalAmount = Number.isFinite(amountNum) ? (hasFeeSameCurrency ? amountNum + feeNum : amountNum) : 0;
-  const transferAmount = Number.isFinite(amountNum) ? amountNum : 0;
+  const hasFee = Number.isFinite(feeNum) && feeNum > 0;
+
+  const amountText = formatAmountPretty(Number.isFinite(amountNum) ? amountNum : 0);
+  const feeText = formatAmountPretty(Number.isFinite(feeNum) ? feeNum : 0);
+  const feeCurrencyName = currencyName(feeCur || safeCurrency);
 
   const firstLine =
     (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
-    ` ${formatAmount(totalAmount)} ${safeCurrency}` +
-    (hasFeeSameCurrency ? `. العمولة: ${formatAmount(feeNum)} ${safeCurrency}` : '');
+    ` ${amountText} ${currencyName(safeCurrency)}` +
+    (hasFee ? `  العمولة: ${feeText} ${feeCurrencyName}` : '');
 
   const company = safeText(transferCompany, 'غير محدد');
   const recipient = safeText(transferRecipient, 'غير محدد');
   const sender = safeText(transferSender, 'غير محدد');
   const number = safeText(transferNumber, 'غير محدد');
-  const dateLine = safeText(dateStr, 'غير محدد');
+  const dateLine = safeText(formatDateTime(dateValue), 'غير محدد');
+
+  const advisory = isSend
+    ? `\nعميلنا العزيز عند إرسالك حوالة احرص \nعلى إبلاغ المستفيد باستلامها`
+    : '';
 
   return (
-`👋 مرحبًا ${safeName}،
-
-📣 ${title}
-
-────────────────
+`(${title})
 ${firstLine}
-مقابل تحويل حوالة من حسابكم لدينا إلى: ${company}
-مبلغ الحوالة: ${formatAmount(transferAmount)}
+
+مقابل ${isSend ? 'تحويل حوالة من حسابكم لدينا إلى' : 'حوالة واردة عن طريق'}: ${company}
+مبلغ الحوالة: ${amountText}
 عملة الحوالة: ${currencyName(safeCurrency)}
 المستلم: ${recipient}
 المرسل: ${sender}
 رقم الحوالة: ${number}
-التاريخ: ${dateLine}
-────────────────`
+
+${dateLine}${advisory}`
   );
 }
 
@@ -156,7 +191,7 @@ function buildMessage({
   currency,
   direction,
   note,
-  dateStr,
+  dateValue,
   balances,
   senderName,
   entryType,
@@ -173,7 +208,7 @@ function buildMessage({
       amount,
       currency,
       direction,
-      dateStr,
+      dateValue,
       transferCompany,
       transferRecipient,
       transferSender,
@@ -193,7 +228,7 @@ function buildMessage({
   const safeAmount = formatAmount(amount != null ? amount : 0);
   const safeCurrency = currency || 'IQD';
   const safeNote = (note && String(note).trim()) ? String(note).trim() : '-';
-  const safeDate = dateStr || 'غير محدد';
+  const safeDate = formatDate(dateValue || Date.now());
   const safeSender = senderName || '-';
   const balanceLines = formatBalancesLines(balances).join('\n');
 
@@ -346,7 +381,7 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     currency: transaction.currency_code,
     direction: transaction.transaction_direction,
     note: transaction.transaction_note,
-    dateStr: formatDate(transaction.transaction_date || transaction.created_at || Date.now()),
+    dateValue: transaction.transaction_date || transaction.created_at || Date.now(),
     balances,
     senderName: ownerName,
     entryType: transaction.entry_type,
