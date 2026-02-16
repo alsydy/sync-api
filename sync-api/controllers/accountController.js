@@ -32,17 +32,21 @@ async function getAccounts(req, res, next) {
     let query = 'SELECT * FROM cash_accounts WHERE deleted_at IS NULL';
     const params = [];
     let paramIndex = 1;
-    
+
+    const ownerFilters = [];
     if (req.user?.userId) {
-      query += ` AND owner_user_id = $${paramIndex++}`;
+      ownerFilters.push(`owner_user_id = $${paramIndex++}`);
       params.push(req.user.userId);
     } else if (ownerUserId) {
-      query += ` AND owner_user_id = $${paramIndex++}`;
+      ownerFilters.push(`owner_user_id = $${paramIndex++}`);
       params.push(ownerUserId);
     }
     if (!req.user?.userId && ownerFirebaseUid) {
-      query += ` AND owner_firebase_uid = $${paramIndex++}`;
+      ownerFilters.push(`owner_firebase_uid = $${paramIndex++}`);
       params.push(ownerFirebaseUid);
+    }
+    if (ownerFilters.length > 0) {
+      query += ` AND ((${ownerFilters.join(' AND ')}) OR is_shared = TRUE)`;
     }
     
     // دعم المزامنة التزايدية
