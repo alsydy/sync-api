@@ -5,7 +5,7 @@
 // ============================================================================
 
 const { pool } = require('../config/database');
-const { generateToken } = require('../middleware/auth');
+const { generateToken, verifyToken } = require('../middleware/auth');
 const { verifyPassword } = require('../utils/helpers');
 const { mapUserToAPI } = require('../utils/mappers');
 const { logAudit } = require('../services/auditService');
@@ -50,6 +50,16 @@ async function login(req, res) {
     
     // إنشاء JWT token
     const token = generateToken(user.user_id, user.firebase_uid);
+    if (process.env.AUTH_DEBUG === '1') {
+      const decoded = verifyToken(token);
+      logger.info('Auth debug', {
+        userId: user.user_id,
+        tokenUserId: decoded?.userId ?? null,
+        firebaseUid: user.firebase_uid ?? null,
+        tokenFirebaseUid: decoded?.firebaseUid ?? null,
+        requestId: req.id
+      });
+    }
     
     // تسجيل العملية
     await logAudit(user.user_id, user.firebase_uid, 'login', 'user', user.user_id.toString(), null, null, req);
