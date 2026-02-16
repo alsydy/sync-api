@@ -31,6 +31,27 @@ function requireBoolean(value, name) {
   return value;
 }
 
+function resolveUserId(req, providedUserId, name) {
+  const authUserId = req.user?.userId;
+  if (authUserId != null) {
+    if (providedUserId != null) {
+      const n = Number(providedUserId);
+      if (!Number.isInteger(n) || n <= 0) {
+        const err = new Error(`${name} must be a positive integer`);
+        err.statusCode = 400;
+        throw err;
+      }
+      if (n !== authUserId) {
+        const err = new Error('user_id does not match auth token');
+        err.statusCode = 403;
+        throw err;
+      }
+    }
+    return authUserId;
+  }
+  return requireInt(providedUserId, name);
+}
+
 // ----------------------------------------------------------------------------
 // Settings
 // ----------------------------------------------------------------------------
@@ -40,7 +61,7 @@ function requireBoolean(value, name) {
  */
 async function getWhatsappSettings(req, res, next) {
   try {
-    const userId = requireInt(req.params.userId, 'userId');
+    const userId = resolveUserId(req, req.params.userId, 'userId');
 
     const r = await pool.query(
       'SELECT * FROM whatsapp_user_settings WHERE user_id = $1 LIMIT 1',
@@ -75,7 +96,7 @@ async function getWhatsappSettings(req, res, next) {
 async function upsertWhatsappSettings(req, res, next) {
   try {
     const body = req.body || {};
-    const userId = requireInt(body.user_id, 'user_id');
+    const userId = resolveUserId(req, body.user_id, 'user_id');
     const enableWhatsapp = requireBoolean(body.enable_whatsapp, 'enable_whatsapp');
     const usePrivateSession = requireBoolean(body.use_private_session, 'use_private_session');
 
@@ -105,7 +126,7 @@ async function upsertWhatsappSettings(req, res, next) {
 async function setClientOptOut(req, res, next) {
   try {
     const body = req.body || {};
-    const userId = requireInt(body.user_id, 'user_id');
+    const userId = resolveUserId(req, body.user_id, 'user_id');
     const clientId = requireInt(body.client_id, 'client_id');
     const optedOut = requireBoolean(body.opted_out, 'opted_out');
 
@@ -159,7 +180,7 @@ async function setClientOptOut(req, res, next) {
  */
 async function getClientOptOuts(req, res, next) {
   try {
-    const userId = requireInt(req.params.userId, 'userId');
+    const userId = resolveUserId(req, req.params.userId, 'userId');
     // Schema in your DB has no opted_out/is_opted_out; presence of a row means opted-out.
     const r = await pool.query(
       'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1',
@@ -188,7 +209,7 @@ async function getClientOptOuts(req, res, next) {
 async function createPrivateSessionRequest(req, res, next) {
   try {
     const body = req.body || {};
-    const userId = requireInt(body.user_id, 'user_id');
+    const userId = resolveUserId(req, body.user_id, 'user_id');
 
     const token = crypto.randomBytes(32).toString('hex');
     const tokenHash = sha256Hex(token);
@@ -270,7 +291,7 @@ async function createPrivateSessionRequest(req, res, next) {
 async function cancelPrivateSession(req, res, next) {
   try {
     const body = req.body || {};
-    const userId = requireInt(body.user_id, 'user_id');
+    const userId = resolveUserId(req, body.user_id, 'user_id');
 
     // Cancel the latest non-ready request
     try {
