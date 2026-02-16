@@ -57,6 +57,59 @@ async function computeNotifyCustomer(ownerUserId, clientId) {
   }
 }
 
+async function ensureSharedMainAccount({ ownerUserId, ownerFirebaseUid }) {
+  if (!ownerUserId) return null;
+  const sharedAccountUuid = '00000000-0000-0000-0000-000000000001';
+  const sharedFirestoreId = 'shared-main-account-v1';
+  logger.info(`Creating shared main account with ownerUserId: ${ownerUserId}`);
+  try {
+    const now = Date.now();
+    const createdAtSeconds = msToSeconds(now);
+    const colorValue = 0xFF0A84FF;
+    const colorHex = normalizeColorCode(colorValue);
+
+    const createResult = await pool.query(
+      `INSERT INTO cash_accounts (
+        account_uuid, firestore_id, owner_user_id, owner_firebase_uid, account_name, is_primary, is_shared,
+        color_code, sync_version, created_at, updated_at
+      ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), CURRENT_TIMESTAMP)
+      ON CONFLICT (account_uuid) DO UPDATE SET
+        account_name = EXCLUDED.account_name,
+        is_primary = EXCLUDED.is_primary,
+        is_shared = EXCLUDED.is_shared,
+        firestore_id = EXCLUDED.firestore_id,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING account_id`,
+      [
+        sharedAccountUuid,
+        sharedFirestoreId,
+        ownerUserId,
+        ownerFirebaseUid || null,
+        'الصندوق الرئيسي',
+        true,
+        true,
+        colorHex,
+        1,
+        createdAtSeconds
+      ]
+    );
+
+    if (createResult.rows.length > 0) {
+      const accountId = createResult.rows[0].account_id;
+      logger.info(`Created shared main account with account_id: ${accountId}`);
+      return accountId;
+    }
+  } catch (error) {
+    logger.error(`Error creating shared main account: ${error.message}`);
+    if (error.code === '23505') {
+      logger.info('Account already exists, searching again...');
+      return await getAccountIdFromFirestoreId(sharedFirestoreId);
+    }
+  }
+
+  return null;
+}
+
 // ----------------------------------------------------------------------------
 // Transactions
 // ----------------------------------------------------------------------------
@@ -234,6 +287,20 @@ async function createTransaction(req, res, next) {
         error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
       });
     }
+    let accountId = await normalizeAccountId(
+      transactionData.accountId,
+      transactionData.accountFirestoreId
+    );
+    if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
+      accountId = await ensureSharedMainAccount({ ownerUserId, ownerFirebaseUid });
+    }
+    if (!accountId) {
+      logger.error('accountId is null in INSERT transaction', { transactionData });
+      return res.status(400).json({
+        success: false,
+        error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
+      });
+    }
     const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
     const result = await pool.query(
@@ -257,7 +324,7 @@ async function createTransaction(req, res, next) {
         ownerUserId,
         ownerFirebaseUid || null,
         clientId,
-        transactionData.accountId,
+        accountId,
         transactionData.customerFirestoreId || transactionData.clientFirestoreId || null,
         transactionData.accountFirestoreId || null,
         transactionData.amount || transactionData.transactionAmount,
@@ -577,51 +644,7 @@ async function syncTransaction(req, res, next) {
 
       // إذا كان accountFirestoreId هو "shared-main-account-v1" ولم يُوجد، أنشئه
       if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1' && ownerUserId) {
-        logger.info(`Creating shared main account with ownerUserId: ${ownerUserId}`);
-        try {
-          const sharedAccountUuid = '00000000-0000-0000-0000-000000000001';
-          const now = Date.now();
-          const createdAtSeconds = msToSeconds(now);
-          const colorValue = 0xFF0A84FF;
-          const colorHex = normalizeColorCode(colorValue);
-
-          const createResult = await pool.query(
-            `INSERT INTO cash_accounts (
-              account_uuid, firestore_id, owner_user_id, owner_firebase_uid, account_name, is_primary, is_shared,
-              color_code, sync_version, created_at, updated_at
-            ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10), CURRENT_TIMESTAMP)
-            ON CONFLICT (account_uuid) DO UPDATE SET
-              account_name = EXCLUDED.account_name,
-              is_primary = EXCLUDED.is_primary,
-              is_shared = EXCLUDED.is_shared,
-              firestore_id = EXCLUDED.firestore_id,
-              updated_at = CURRENT_TIMESTAMP
-            RETURNING account_id`,
-            [
-              sharedAccountUuid,
-              'shared-main-account-v1',
-              ownerUserId,
-              transactionData.ownerFirebaseUid || null,
-              'الصندوق الرئيسي',
-              true,
-              true,
-              colorHex,
-              1,
-              createdAtSeconds
-            ]
-          );
-
-          if (createResult.rows.length > 0) {
-            accountId = createResult.rows[0].account_id;
-            logger.info(`Created shared main account with account_id: ${accountId}`);
-          }
-        } catch (error) {
-          logger.error(`Error creating shared main account: ${error.message}`);
-          if (error.code === '23505') {
-            logger.info(`Account already exists, searching again...`);
-            accountId = await getAccountIdFromFirestoreId('shared-main-account-v1');
-          }
-        }
+        accountId = await ensureSharedMainAccount({ ownerUserId, ownerFirebaseUid });
       }
 
       if (!accountId) {
