@@ -34,19 +34,6 @@ function requireBoolean(value, name) {
 function resolveUserId(req, providedUserId, name) {
   const authUserId = req.user?.userId;
   if (authUserId != null) {
-    if (providedUserId != null) {
-      const n = Number(providedUserId);
-      if (!Number.isInteger(n) || n <= 0) {
-        const err = new Error(`${name} must be a positive integer`);
-        err.statusCode = 400;
-        throw err;
-      }
-      if (n !== authUserId) {
-        const err = new Error('user_id does not match auth token');
-        err.statusCode = 403;
-        throw err;
-      }
-    }
     return authUserId;
   }
   return requireInt(providedUserId, name);
@@ -125,6 +112,9 @@ async function upsertWhatsappSettings(req, res, next) {
  */
 async function setClientOptOut(req, res, next) {
   try {
+    if (process.env.WA_AUTH_DEBUG === '1') {
+      logger.info('WA auth debug', { authUser: req.user, param: req.params, body: req.body });
+    }
     const body = req.body || {};
     const userId = resolveUserId(req, body.user_id, 'user_id');
     const clientId = requireInt(body.client_id, 'client_id');
@@ -180,6 +170,9 @@ async function setClientOptOut(req, res, next) {
  */
 async function getClientOptOuts(req, res, next) {
   try {
+    if (process.env.WA_AUTH_DEBUG === '1') {
+      logger.info('WA auth debug', { authUser: req.user, param: req.params, body: req.body });
+    }
     const userId = resolveUserId(req, req.params.userId, 'userId');
     // Schema in your DB has no opted_out/is_opted_out; presence of a row means opted-out.
     const r = await pool.query(
