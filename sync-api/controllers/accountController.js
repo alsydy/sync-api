@@ -71,7 +71,7 @@ async function getAccounts(req, res, next) {
       await ensureDefaultAccounts(effectiveUserId);
     }
 
-    let query = 'SELECT * FROM cash_accounts WHERE owner_user_id = $1 AND deleted_at IS NULL';
+    let query = 'SELECT * FROM cash_accounts WHERE owner_user_id = $1 AND deleted_at IS NULL AND is_shared = FALSE';
     const params = [effectiveUserId];
     let paramIndex = 2;
 
