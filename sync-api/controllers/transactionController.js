@@ -55,18 +55,39 @@ async function computeNotifyCustomer(ownerUserId, clientId) {
 }
 
 const SHARED_ACCOUNT_ERROR = 'الحساب المشترك غير مدعوم. يرجى استخدام الصناديق الافتراضية الخاصة بك.';
+const ACCOUNT_OWNERSHIP_ERROR = 'الحساب لا يخص هذا المستخدم أو غير متاح.';
+const ACCOUNT_DELETED_ERROR = 'الحساب محذوف أو مؤرشف.';
 
-async function isSharedAccount(accountId) {
-  if (!accountId) return false;
+async function validateAccountForOwner(accountId, ownerUserId) {
+  if (!accountId || !ownerUserId) {
+    return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
+  }
+  const ownerIdNum = typeof ownerUserId === 'string' ? parseInt(ownerUserId, 10) : ownerUserId;
+  if (!Number.isFinite(ownerIdNum)) {
+    return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
+  }
   try {
     const result = await pool.query(
-      'SELECT is_shared FROM cash_accounts WHERE account_id = $1 LIMIT 1',
+      'SELECT owner_user_id, deleted_at, is_shared FROM cash_accounts WHERE account_id = $1 LIMIT 1',
       [accountId]
     );
-    return result.rows.length > 0 && result.rows[0].is_shared === true;
+    if (result.rows.length === 0) {
+      return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
+    }
+    const row = result.rows[0];
+    if (row.deleted_at) {
+      return { ok: false, error: ACCOUNT_DELETED_ERROR };
+    }
+    if (row.is_shared === true) {
+      return { ok: false, error: SHARED_ACCOUNT_ERROR };
+    }
+    if (row.owner_user_id !== ownerIdNum) {
+      return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
+    }
+    return { ok: true };
   } catch (error) {
-    logger.warning('isSharedAccount check failed', { accountId, error: error.message });
-    return false;
+    logger.warning('validateAccountForOwner failed', { accountId, ownerUserId, error: error.message });
+    return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
   }
 }
 
@@ -261,8 +282,9 @@ async function createTransaction(req, res, next) {
         error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
       });
     }
-    if (await isSharedAccount(accountId)) {
-      return res.status(400).json({ success: false, error: SHARED_ACCOUNT_ERROR });
+    const accountCheck = await validateAccountForOwner(accountId, ownerUserId);
+    if (!accountCheck.ok) {
+      return res.status(400).json({ success: false, error: accountCheck.error });
     }
     const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
 
@@ -433,8 +455,9 @@ async function syncTransaction(req, res, next) {
           error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
         });
       }
-      if (await isSharedAccount(accountId)) {
-        return res.status(400).json({ success: false, error: SHARED_ACCOUNT_ERROR });
+      const accountCheck = await validateAccountForOwner(accountId, ownerUserId);
+      if (!accountCheck.ok) {
+        return res.status(400).json({ success: false, error: accountCheck.error });
       }
 
       const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
@@ -619,8 +642,9 @@ async function syncTransaction(req, res, next) {
           error: 'accountId مطلوب - لا يمكن العثور على الحساب في قاعدة البيانات. يرجى التأكد من أن الحساب مسجل في النظام.'
         });
       }
-      if (await isSharedAccount(accountId)) {
-        return res.status(400).json({ success: false, error: SHARED_ACCOUNT_ERROR });
+      const accountCheck = await validateAccountForOwner(accountId, ownerUserId);
+      if (!accountCheck.ok) {
+        return res.status(400).json({ success: false, error: accountCheck.error });
       }
 
       const notifyCustomerServer = await computeNotifyCustomer(ownerUserId, clientId);
