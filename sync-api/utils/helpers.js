@@ -231,14 +231,20 @@ async function normalizeOwnerUserId(ownerUserId, ownerFirebaseUid) {
   // إذا كان ownerUserId موجوداً ورقماً، تأكد أولاً أنه موجود في app_users
   if (numericOwnerId) {
     try {
-      const checkResult = await pool.query(
-        'SELECT user_id FROM app_users WHERE user_id = $1 LIMIT 1',
-        [numericOwnerId]
-      );
+      // إذا كان ownerFirebaseUid متوفرًا، تأكد من التطابق بينهما
+      const checkResult = ownerFirebaseUid
+        ? await pool.query(
+          'SELECT user_id FROM app_users WHERE user_id = $1 AND firebase_uid = $2 LIMIT 1',
+          [numericOwnerId, ownerFirebaseUid]
+        )
+        : await pool.query(
+          'SELECT user_id FROM app_users WHERE user_id = $1 LIMIT 1',
+          [numericOwnerId]
+        );
       if (checkResult.rows.length > 0) {
         return numericOwnerId;
       } else {
-        logger.warning('normalizeOwnerUserId: numeric ownerUserId not found in app_users, falling back to firebaseUid', {
+        logger.warning('normalizeOwnerUserId: numeric ownerUserId not found or mismatched, falling back to firebaseUid', {
           ownerUserId: numericOwnerId,
           ownerFirebaseUid
         });
@@ -434,21 +440,7 @@ async function getAccountIdFromFirestoreId(firestoreId, ownerUserId = null) {
 
     query += ' LIMIT 1';
 
-    let result = await pool.query(query, params);
-    if (result.rows.length === 0 && hasOwner) {
-      // Fallback: try without owner scoping (legacy data) but log it
-      const fallbackQuery = isUuid
-        ? 'SELECT account_id FROM cash_accounts WHERE account_uuid = $1::uuid OR firestore_id = $2 LIMIT 1'
-        : 'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1';
-      const fallbackParams = isUuid ? [firestoreId, firestoreId] : [firestoreId];
-      result = await pool.query(fallbackQuery, fallbackParams);
-      if (result.rows.length > 0) {
-        logger.warning('Account resolved without owner scoping', {
-          firestoreId,
-          ownerUserId
-        });
-      }
-    }
+    const result = await pool.query(query, params);
     
     if (result.rows.length > 0) {
       logger.info('Found account_id for firestoreId', {
