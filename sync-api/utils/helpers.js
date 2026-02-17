@@ -423,8 +423,10 @@ async function getAccountIdFromFirestoreId(firestoreId, ownerUserId = null) {
     }
 
     if (isUuid) {
+      // Use separate params to avoid UUID vs VARCHAR operator mismatch
       params.push(firestoreId);
-      query += `(account_uuid = $${params.length} OR firestore_id = $${params.length})`;
+      params.push(firestoreId);
+      query += `(account_uuid = $${params.length - 1}::uuid OR firestore_id = $${params.length})`;
     } else {
       params.push(firestoreId);
       query += `firestore_id = $${params.length}`;
@@ -435,10 +437,10 @@ async function getAccountIdFromFirestoreId(firestoreId, ownerUserId = null) {
     let result = await pool.query(query, params);
     if (result.rows.length === 0 && hasOwner) {
       // Fallback: try without owner scoping (legacy data) but log it
-      const fallbackParams = isUuid ? [firestoreId] : [firestoreId];
       const fallbackQuery = isUuid
-        ? 'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 OR firestore_id = $1 LIMIT 1'
+        ? 'SELECT account_id FROM cash_accounts WHERE account_uuid = $1::uuid OR firestore_id = $2 LIMIT 1'
         : 'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1';
+      const fallbackParams = isUuid ? [firestoreId, firestoreId] : [firestoreId];
       result = await pool.query(fallbackQuery, fallbackParams);
       if (result.rows.length > 0) {
         logger.warning('Account resolved without owner scoping', {
