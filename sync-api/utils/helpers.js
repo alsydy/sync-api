@@ -412,15 +412,12 @@ async function getAccountIdFromFirestoreId(firestoreId) {
     return null;
   }
   try {
-    const isUUID = isValidUUID(firestoreId);
-    
-    let result;
-    if (isUUID) {
-      result = await pool.query(
-        'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 LIMIT 1',
-        [firestoreId]
-      );
-    } else {
+    // ✅ جرب account_uuid أولاً ثم firestore_id (حتى لو كان UUID)
+    let result = await pool.query(
+      'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 LIMIT 1',
+      [firestoreId]
+    );
+    if (result.rows.length === 0) {
       result = await pool.query(
         'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1',
         [firestoreId]
@@ -458,6 +455,9 @@ async function normalizeAccountId(accountId, accountFirestoreId) {
     if (foundAccountId) {
       return foundAccountId;
     }
+    // ✅ لا تستخدم accountId المحلي إذا فشل حل accountFirestoreId لتجنب ربط خاطئ
+    logger.warning('accountFirestoreId provided but not resolved', { accountId, accountFirestoreId });
+    return null;
   }
 
   if (accountId && typeof accountId === 'number') {
