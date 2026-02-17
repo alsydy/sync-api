@@ -270,7 +270,8 @@ async function createTransaction(req, res, next) {
     }
     let accountId = await normalizeAccountId(
       transactionData.accountId,
-      transactionData.accountFirestoreId
+      transactionData.accountFirestoreId,
+      ownerUserId
     );
     if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1') {
       return res.status(400).json({ success: false, error: SHARED_ACCOUNT_ERROR });
@@ -445,7 +446,8 @@ async function syncTransaction(req, res, next) {
       // الحصول على accountId الصحيح
       const accountId = await normalizeAccountId(
         transactionData.accountId,
-        transactionData.accountFirestoreId
+        transactionData.accountFirestoreId,
+        ownerUserId
       );
 
       if (!accountId) {
@@ -628,7 +630,8 @@ async function syncTransaction(req, res, next) {
 
       let accountId = await normalizeAccountId(
         transactionData.accountId,
-        transactionData.accountFirestoreId
+        transactionData.accountFirestoreId,
+        ownerUserId
       );
 
       if (!accountId && transactionData.accountFirestoreId === 'shared-main-account-v1') {
