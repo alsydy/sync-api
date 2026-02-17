@@ -407,27 +407,52 @@ async function normalizeClientId(clientId, clientFirestoreId) {
 /**
  * الحصول على account_id من accountFirestoreId
  */
-async function getAccountIdFromFirestoreId(firestoreId) {
+async function getAccountIdFromFirestoreId(firestoreId, ownerUserId = null) {
   if (!firestoreId) {
     return null;
   }
   try {
-    // ✅ جرب account_uuid أولاً ثم firestore_id (حتى لو كان UUID)
-    let result = await pool.query(
-      'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 LIMIT 1',
-      [firestoreId]
-    );
-    if (result.rows.length === 0) {
-      result = await pool.query(
-        'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1',
-        [firestoreId]
-      );
+    const isUuid = isValidUUID(firestoreId);
+    const hasOwner = ownerUserId != null;
+    const params = [];
+    let query = 'SELECT account_id FROM cash_accounts WHERE ';
+
+    if (hasOwner) {
+      params.push(ownerUserId);
+      query += `owner_user_id = $${params.length} AND `;
+    }
+
+    if (isUuid) {
+      params.push(firestoreId);
+      query += `(account_uuid = $${params.length} OR firestore_id = $${params.length})`;
+    } else {
+      params.push(firestoreId);
+      query += `firestore_id = $${params.length}`;
+    }
+
+    query += ' LIMIT 1';
+
+    let result = await pool.query(query, params);
+    if (result.rows.length === 0 && hasOwner) {
+      // Fallback: try without owner scoping (legacy data) but log it
+      const fallbackParams = isUuid ? [firestoreId] : [firestoreId];
+      const fallbackQuery = isUuid
+        ? 'SELECT account_id FROM cash_accounts WHERE account_uuid = $1 OR firestore_id = $1 LIMIT 1'
+        : 'SELECT account_id FROM cash_accounts WHERE firestore_id = $1 LIMIT 1';
+      result = await pool.query(fallbackQuery, fallbackParams);
+      if (result.rows.length > 0) {
+        logger.warning('Account resolved without owner scoping', {
+          firestoreId,
+          ownerUserId
+        });
+      }
     }
     
     if (result.rows.length > 0) {
       logger.info('Found account_id for firestoreId', {
         accountId: result.rows[0].account_id,
-        firestoreId
+        firestoreId,
+        ownerUserId
       });
       return result.rows[0].account_id;
     } else {
@@ -446,27 +471,28 @@ async function getAccountIdFromFirestoreId(firestoreId) {
 /**
  * تحويل accountId إلى Long (يدعم String و Long)
  */
-async function normalizeAccountId(accountId, accountFirestoreId) {
-  logger.debug('normalizeAccountId', { accountId, accountFirestoreId });
+async function normalizeAccountId(accountId, accountFirestoreId, ownerUserId = null) {
+  logger.debug('normalizeAccountId', { accountId, accountFirestoreId, ownerUserId });
 
   // إذا كان accountFirestoreId موجوداً، احصل على account_id أولاً (أكثر أماناً من accountId المحلي)
   if (accountFirestoreId) {
-    const foundAccountId = await getAccountIdFromFirestoreId(accountFirestoreId);
+    const foundAccountId = await getAccountIdFromFirestoreId(accountFirestoreId, ownerUserId);
     if (foundAccountId) {
       return foundAccountId;
     }
     // ✅ لا تستخدم accountId المحلي إذا فشل حل accountFirestoreId لتجنب ربط خاطئ
-    logger.warning('accountFirestoreId provided but not resolved', { accountId, accountFirestoreId });
+    logger.warning('accountFirestoreId provided but not resolved', { accountId, accountFirestoreId, ownerUserId });
     return null;
   }
 
   if (accountId && typeof accountId === 'number') {
     // التحقق من وجود accountId في قاعدة البيانات
     try {
-      const checkResult = await pool.query(
-        'SELECT account_id FROM cash_accounts WHERE account_id = $1',
-        [accountId]
-      );
+      const checkQuery = ownerUserId != null
+        ? 'SELECT account_id FROM cash_accounts WHERE account_id = $1 AND owner_user_id = $2'
+        : 'SELECT account_id FROM cash_accounts WHERE account_id = $1';
+      const checkParams = ownerUserId != null ? [accountId, ownerUserId] : [accountId];
+      const checkResult = await pool.query(checkQuery, checkParams);
       if (checkResult.rows.length > 0) {
         return accountId;
       }
