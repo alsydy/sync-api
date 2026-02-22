@@ -16,7 +16,7 @@ const logger = require('../utils/logger');
 async function getActivePrivacyPolicy(req, res) {
   try {
     const policyResult = await pool.query(
-      `SELECT policy_id, title, version, published_at, updated_at
+      `SELECT policy_id, title, version, app_version, published_at, updated_at
        FROM privacy_policies
        WHERE is_active = TRUE
        ORDER BY published_at DESC NULLS LAST, policy_id DESC
@@ -37,18 +37,20 @@ async function getActivePrivacyPolicy(req, res) {
       [policy.policy_id]
     );
 
+    const toInt = (value) => (value === null || value === undefined ? null : Number(value));
     const items = itemsResult.rows.map((row) => ({
-      itemId: row.item_id,
-      order: row.item_order,
+      itemId: toInt(row.item_id),
+      order: row.item_order !== null && row.item_order !== undefined ? Number(row.item_order) : null,
       text: row.item_text
     }));
 
     res.json({
       success: true,
       data: {
-        policyId: policy.policy_id,
+        policyId: toInt(policy.policy_id),
         title: policy.title,
-        version: policy.version,
+        version: toInt(policy.version),
+        appVersion: policy.app_version || null,
         publishedAt: policy.published_at ? secondsToMs(policy.published_at) : null,
         updatedAt: policy.updated_at ? secondsToMs(policy.updated_at) : null,
         items
