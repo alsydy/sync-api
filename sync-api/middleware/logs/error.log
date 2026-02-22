@@ -1,0 +1,2 @@
+{"environment":"development","error":"connect ECONNREFUSED ::1:5432","level":"error","message":"❌ Database connection failed","service":"malymax-api","timestamp":"2026-01-25 17:51:07"}
+{"environment":"development","error":"connect ECONNREFUSED ::1:5432","level":"error","message":"❌ Database connection failed","service":"malymax-api","timestamp":"2026-01-25 18:08:08"}
