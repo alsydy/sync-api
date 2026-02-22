@@ -9,7 +9,7 @@ const { msToSeconds } = require('../utils/helpers');
 
 async function getActivePrivacyPolicy(client = pool) {
   const result = await client.query(
-    `SELECT policy_id, title, version, is_active, published_at, updated_at
+    `SELECT policy_id, title, version, app_version, is_active, published_at, updated_at
      FROM privacy_policies
      WHERE is_active = TRUE
      ORDER BY published_at DESC NULLS LAST, policy_id DESC
@@ -20,11 +20,14 @@ async function getActivePrivacyPolicy(client = pool) {
 
 function extractPrivacyPolicyAcceptance(userData) {
   const policyId =
-    userData.privacyPolicyId ||
-    userData.privacyPolicyVersion ||
-    userData.policyId ||
-    userData.privacy_policy_id ||
-    userData.privacy_policy_version ||
+    userData.privacyPolicyId ??
+    userData.policyId ??
+    userData.privacy_policy_id ??
+    null;
+
+  const policyVersion =
+    userData.privacyPolicyVersion ??
+    userData.privacy_policy_version ??
     null;
 
   const acceptedAt =
@@ -34,7 +37,7 @@ function extractPrivacyPolicyAcceptance(userData) {
     userData.privacy_policy_accepted_at ||
     null;
 
-  return { policyId, acceptedAt };
+  return { policyId, policyVersion, acceptedAt };
 }
 
 async function validatePrivacyPolicyAcceptance(client, userData) {
@@ -43,16 +46,35 @@ async function validatePrivacyPolicyAcceptance(client, userData) {
     return { policy: null };
   }
 
-  const { policyId, acceptedAt } = extractPrivacyPolicyAcceptance(userData);
+  const { policyId, policyVersion, acceptedAt } = extractPrivacyPolicyAcceptance(userData);
   const normalizedPolicyId = policyId !== null && policyId !== undefined
     ? parseInt(policyId, 10)
     : null;
+  const normalizedPolicyVersion = policyVersion !== null && policyVersion !== undefined
+    ? parseInt(policyVersion, 10)
+    : null;
+  const activePolicyId = activePolicy.policy_id !== null && activePolicy.policy_id !== undefined
+    ? parseInt(activePolicy.policy_id, 10)
+    : null;
+  const activePolicyVersion = activePolicy.version !== null && activePolicy.version !== undefined
+    ? parseInt(activePolicy.version, 10)
+    : null;
 
-  if (!Number.isFinite(normalizedPolicyId)) {
+  const hasPolicyId = Number.isFinite(normalizedPolicyId);
+  const hasPolicyVersion = Number.isFinite(normalizedPolicyVersion);
+
+  if (!hasPolicyId && !hasPolicyVersion) {
     return { error: 'يجب الموافقة على سياسة الخصوصية قبل إنشاء الحساب' };
   }
 
-  if (normalizedPolicyId !== activePolicy.policy_id) {
+  if (!Number.isFinite(activePolicyId) && !Number.isFinite(activePolicyVersion)) {
+    return { error: 'سياسة الخصوصية المعتمدة غير متاحة حالياً' };
+  }
+
+  const idMatches = hasPolicyId && Number.isFinite(activePolicyId) && normalizedPolicyId === activePolicyId;
+  const versionMatches = hasPolicyVersion && Number.isFinite(activePolicyVersion) && normalizedPolicyVersion === activePolicyVersion;
+
+  if (!idMatches && !versionMatches) {
     return { error: 'سياسة الخصوصية المعتمدة غير مطابقة للإصدار الحالي' };
   }
 
