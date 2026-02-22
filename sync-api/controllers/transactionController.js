@@ -62,7 +62,28 @@ async function computeNotifyCustomer(ownerUserId, clientId) {
         [ownerUserId, clientId]
       )
     ]);
-    const enabled = s.rows.length > 0 && s.rows[0].enable_whatsapp === true;
+    let enabled = s.rows.length > 0 && s.rows[0].enable_whatsapp === true;
+    if (s.rows.length === 0) {
+      try {
+        const u = await pool.query(
+          'SELECT receive_transaction_notifications FROM app_users WHERE user_id = $1 LIMIT 1',
+          [ownerUserId]
+        );
+        const defaultEnabled = u.rows.length === 0 || u.rows[0].receive_transaction_notifications !== false;
+        enabled = defaultEnabled === true;
+        // Create default whatsapp_user_settings row to keep sync-api/whatsapp-api behavior consistent
+        await pool.query(
+          `
+          INSERT INTO whatsapp_user_settings (user_id, enable_whatsapp, use_private_session, updated_at)
+          VALUES ($1, $2, FALSE, CURRENT_TIMESTAMP)
+          ON CONFLICT (user_id) DO NOTHING
+          `,
+          [ownerUserId, enabled]
+        );
+      } catch (e) {
+        logger.warning('computeNotifyCustomer fallback failed', { ownerUserId, error: e?.message });
+      }
+    }
     const optedOut = o.rows.length > 0;
     return enabled && !optedOut;
   } catch (e) {
