@@ -338,25 +338,29 @@ function normalizeColorCode(color) {
 /**
  * الحصول على client_id من clientFirestoreId
  */
-async function getClientIdFromFirestoreId(firestoreId) {
+async function getClientIdFromFirestoreId(firestoreId, ownerUserId = null) {
   if (!firestoreId) {
     return null;
   }
   try {
     const isUUID = isValidUUID(firestoreId);
-    
-    let result;
+
+    const params = [];
+    let query = 'SELECT client_id FROM business_clients WHERE ';
     if (isUUID) {
-      result = await pool.query(
-        'SELECT client_id FROM business_clients WHERE client_uuid = $1 LIMIT 1',
-        [firestoreId]
-      );
+      params.push(firestoreId);
+      query += `client_uuid = $${params.length}`;
     } else {
-      result = await pool.query(
-        'SELECT client_id FROM business_clients WHERE firestore_id = $1 LIMIT 1',
-        [firestoreId]
-      );
+      params.push(firestoreId);
+      query += `firestore_id = $${params.length}`;
     }
+    if (ownerUserId != null) {
+      params.push(ownerUserId);
+      query += ` AND owner_user_id = $${params.length}`;
+    }
+    query += ' LIMIT 1';
+
+    const result = await pool.query(query, params);
     
     if (result.rows.length > 0) {
       logger.info('Found client_id for firestoreId', {
@@ -380,29 +384,41 @@ async function getClientIdFromFirestoreId(firestoreId) {
 /**
  * تحويل clientId إلى Long (يدعم String و Long)
  */
-async function normalizeClientId(clientId, clientFirestoreId) {
-  logger.debug('normalizeClientId', { clientId, clientFirestoreId });
+async function normalizeClientId(clientId, clientFirestoreId, ownerUserId = null) {
+  logger.debug('normalizeClientId', { clientId, clientFirestoreId, ownerUserId });
   
-  if (clientId && typeof clientId === 'number') {
-    // التحقق من وجود clientId في قاعدة البيانات
+  // Prefer stable firestore/UUID mapping when available (prevents cross-client mismatch)
+  if (clientFirestoreId) {
+    const foundClientId = await getClientIdFromFirestoreId(clientFirestoreId, ownerUserId);
+    if (foundClientId) {
+      return foundClientId;
+    }
+  }
+
+  // Fallback to clientId (only if it belongs to this owner)
+  let numericClientId = null;
+  if (typeof clientId === 'number') {
+    numericClientId = clientId;
+  } else if (typeof clientId === 'string' && clientId.trim() !== '') {
+    const parsed = Number(clientId);
+    if (Number.isFinite(parsed)) numericClientId = parsed;
+  }
+
+  if (numericClientId != null) {
     try {
-      const checkResult = await pool.query(
-        'SELECT client_id FROM business_clients WHERE client_id = $1',
-        [clientId]
-      );
+      const params = [numericClientId];
+      let query = 'SELECT client_id FROM business_clients WHERE client_id = $1';
+      if (ownerUserId != null) {
+        params.push(ownerUserId);
+        query += ` AND owner_user_id = $${params.length}`;
+      }
+      query += ' LIMIT 1';
+      const checkResult = await pool.query(query, params);
       if (checkResult.rows.length > 0) {
-        return clientId;
+        return numericClientId;
       }
     } catch (error) {
       logger.warning('Error checking clientId', { error: error.message });
-    }
-  }
-  
-  // إذا كان clientFirestoreId موجوداً، احصل على client_id من قاعدة البيانات
-  if (clientFirestoreId) {
-    const foundClientId = await getClientIdFromFirestoreId(clientFirestoreId);
-    if (foundClientId) {
-      return foundClientId;
     }
   }
   
