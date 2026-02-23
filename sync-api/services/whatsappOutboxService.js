@@ -266,6 +266,39 @@ function buildBalanceLineForCurrency(balances, currencyCode) {
   return `الرصيد: ${absVal} ${currencyName(code)} ${status}`;
 }
 
+function buildSimpleBalanceLineForCurrency(balances, currencyCode) {
+  if (!Array.isArray(balances) || balances.length === 0) return '';
+  const code = String(currencyCode || '').toUpperCase();
+  if (!code) return '';
+  const row = balances.find((b) => String(b.currency || '').toUpperCase() === code);
+  if (!row) return '';
+  const raw = Number(row.balance);
+  if (!Number.isFinite(raw)) return '';
+  const absVal = formatAmountPretty(Math.abs(raw));
+  const status = raw > 0 ? 'لكم' : raw < 0 ? 'عليكم' : 'متزن';
+  return `الرصيد ${status}: ${absVal} ${currencyName(code)}`;
+}
+
+function buildFeeOnlyRemittanceMessage({
+  amount,
+  currency,
+  dateValue,
+  transferNumber,
+  balances
+}) {
+  const safeCurrency = String(currency || 'IQD').toUpperCase();
+  const amountText = formatAmountPretty(Number.isFinite(Number(amount)) ? Number(amount) : 0);
+  const number = safeText(transferNumber, '0');
+  const dateLine = safeText(formatDateTime(dateValue), 'غير محدد');
+  const balanceLine = buildSimpleBalanceLineForCurrency(balances, safeCurrency);
+  const balanceBlock = balanceLine ? `\n\n${balanceLine}` : '';
+  return (
+`تم خصم ${amountText} ${currencyName(safeCurrency)} مقابل عمولة تسليم حوالة رقم ${number}
+
+${dateLine}${balanceBlock}`
+  );
+}
+
 function buildTransferMessage({
   customerName,
   amount,
@@ -300,10 +333,14 @@ function buildTransferMessage({
   const feeText = formatAmountPretty(Number.isFinite(feeNum) ? feeNum : 0);
   const feeCurrencyName = currencyName(feeCur || safeCurrency);
 
+  const feeSegment = (isSend && hasFee)
+    ? `  العمولة: ${feeText} ${feeCurrencyName}`
+    : '';
+
   const firstLine =
     (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
     ` ${amountText} ${currencyName(safeCurrency)}` +
-    (hasFee ? `  العمولة: ${feeText} ${feeCurrencyName}` : '');
+    feeSegment;
 
   const company = safeText(transferCompany, 'غير محدد');
   const recipient = safeText(transferRecipient, 'غير محدد');
@@ -315,11 +352,13 @@ function buildTransferMessage({
     ? `\nعميلنا العزيز عند إرسالك حوالة احرص \nعلى إبلاغ المستفيد باستلامها`
     : '';
 
-  const balanceLine = buildBalanceLineForCurrency(balances, safeCurrency);
+  const balanceLine = isSend
+    ? buildBalanceLineForCurrency(balances, safeCurrency)
+    : buildSimpleBalanceLineForCurrency(balances, safeCurrency);
   const balanceBlock = balanceLine ? `\n\n${balanceLine}` : '';
 
   return (
-`(${title})
+`*(${title})*
 ${firstLine}
 
 مقابل ${isSend ? 'تحويل حوالة من حسابكم لدينا إلى' : 'حوالة واردة عن طريق'}: ${company}
@@ -350,6 +389,19 @@ function buildMessage({
   feeAmount,
   feeCurrency
 }) {
+  if (isFeeOnlyRemittanceTransaction({
+    entry_type: entryType,
+    transaction_direction: direction,
+    transaction_note: note
+  })) {
+    return buildFeeOnlyRemittanceMessage({
+      amount,
+      currency,
+      dateValue,
+      transferNumber,
+      balances
+    });
+  }
   if (isTransferEntry({ entryType, transferCompany, transferRecipient, transferSender, transferNumber })) {
     return buildTransferMessage({
       customerName,
@@ -509,11 +561,6 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
   const clientId = transaction?.client_id;
 
   if (!tUuid || !ownerUserId || !clientId) return { enqueued: false, reason: 'missing-fields' };
-
-  if (isFeeOnlyRemittanceTransaction(transaction)) {
-    await markWhatsappCancelled(transaction, 'fee_only_remittance');
-    return { enqueued: false, reason: 'fee_only_remittance' };
-  }
 
   // احترام notify_customer أيضاً لتجنب إرسال غير مقصود
   if (transaction.notify_customer !== true) {
