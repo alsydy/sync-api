@@ -229,7 +229,11 @@ function isFeeOnlyRemittanceTransaction(tx) {
   const note = String(tx?.transaction_note || '');
   const feeHints = ['خدمة تحويل', 'عمولة تحويل', 'عمولة تسليم', 'خدمة تسليم'];
   const hasFeeHint = feeHints.some((hint) => note.includes(hint)) || note.toLowerCase().includes('fee');
-  return hasFeeHint;
+  const amountNum = Number(tx?.transaction_amount ?? tx?.amount);
+  const feeNum = Number(tx?.fee_amount ?? tx?.feeAmount);
+  const hasFee = Number.isFinite(feeNum) && feeNum > 0;
+  const amountIsZero = !Number.isFinite(amountNum) || amountNum <= 0;
+  return hasFeeHint || (hasFee && amountIsZero);
 }
 
 function computeTransferDisplayAmount({ amount, currency, feeAmount, feeCurrency, direction }) {
@@ -279,23 +283,38 @@ function buildSimpleBalanceLineForCurrency(balances, currencyCode) {
   return `${label}: ${absVal} ${currencyName(code)}`;
 }
 
+function inferFeeLabel(note) {
+  const n = String(note || '');
+  if (n.includes('تحويل')) return 'عمولة تحويل';
+  if (n.includes('تسليم')) return 'عمولة تسليم';
+  return 'عمولة حوالة';
+}
+
 function buildFeeOnlyRemittanceMessage({
   amount,
+  feeAmount,
+  feeCurrency,
   currency,
   dateValue,
   transferNumber,
+  note,
   balances
 }) {
-  const safeCurrency = String(currency || 'IQD').toUpperCase();
-  const amountText = formatAmountPretty(Number.isFinite(Number(amount)) ? Number(amount) : 0);
+  const safeCurrency = String(feeCurrency || currency || 'IQD').toUpperCase();
+  const feeNum = Number(feeAmount);
+  const amountNum = Number(amount);
+  const displayAmount = Number.isFinite(feeNum) && feeNum > 0
+    ? feeNum
+    : (Number.isFinite(amountNum) ? amountNum : 0);
+  const amountText = formatAmountPretty(displayAmount);
   const number = safeText(transferNumber, '0');
-  const dateLine = safeText(formatDateTime(dateValue), 'غير محدد');
-  const balanceLine = buildSimpleBalanceLineForCurrency(balances, safeCurrency);
+  const feeLabel = inferFeeLabel(note);
+  const balanceLine = buildBalanceLineForCurrency(balances, safeCurrency);
   const balanceBlock = balanceLine ? `\n\n${balanceLine}` : '';
   return (
-`تم خصم ${amountText} ${currencyName(safeCurrency)} مقابل عمولة تسليم حوالة رقم ${number}
-
-${dateLine}${balanceBlock}`
+`عليكم خصم ${amountText} ${currencyName(safeCurrency)}
+تم خصم ${feeLabel} حوالة رقم الحوالة: ${number}
+${balanceBlock}`
   );
 }
 
@@ -392,13 +411,18 @@ function buildMessage({
   if (isFeeOnlyRemittanceTransaction({
     entry_type: entryType,
     transaction_direction: direction,
-    transaction_note: note
+    transaction_note: note,
+    transaction_amount: amount,
+    fee_amount: feeAmount
   })) {
     return buildFeeOnlyRemittanceMessage({
       amount,
+      feeAmount,
+      feeCurrency,
       currency,
       dateValue,
       transferNumber,
+      note,
       balances
     });
   }
