@@ -8,8 +8,91 @@ const { v4: uuidv4 } = require('uuid');
 const { pool } = require('../config/database');
 const logger = require('../utils/logger');
 
-// Note: current DB schema uses columns:
-// id (uuid), to_phone, tries, max_tries, next_retry_at, next_attempt_at (nullable)
+// Note: schema may vary between legacy and new WhatsApp outbox tables.
+// We detect columns at runtime and insert accordingly.
+
+const OUTBOX_SCHEMA_TTL_MS = 60_000;
+let outboxSchemaCache = null;
+let outboxSchemaCacheAt = 0;
+
+async function getOutboxSchema() {
+  const now = Date.now();
+  if (outboxSchemaCache && (now - outboxSchemaCacheAt) < OUTBOX_SCHEMA_TTL_MS) {
+    return outboxSchemaCache;
+  }
+  try {
+    const r = await pool.query(
+      `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'whatsapp_outbox'
+      `
+    );
+    const cols = new Set((r.rows || []).map((x) => String(x.column_name)));
+    const has = (c) => cols.has(c);
+    outboxSchemaCache = {
+      hasOutboxId: has('outbox_id'),
+      hasId: has('id'),
+      phoneCol: has('phone_number') ? 'phone_number' : (has('to_phone') ? 'to_phone' : 'phone_number'),
+      attemptsCol: has('attempts') ? 'attempts' : (has('tries') ? 'tries' : null),
+      hasMaxTries: has('max_tries'),
+      hasNextAttemptAt: has('next_attempt_at'),
+      hasNextRetryAt: has('next_retry_at')
+    };
+    outboxSchemaCacheAt = now;
+    return outboxSchemaCache;
+  } catch (e) {
+    logger.warning('Failed to detect whatsapp_outbox schema', { error: e?.message });
+    outboxSchemaCache = null;
+    outboxSchemaCacheAt = now;
+    return null;
+  }
+}
+
+async function insertOutboxRow({
+  ownerUserId,
+  clientId,
+  transactionUuid,
+  transactionId,
+  clientPhone,
+  messageText
+}) {
+  const schema = await getOutboxSchema();
+  if (!schema) throw new Error('outbox_schema_missing');
+
+  const cols = [];
+  const params = [];
+  let idx = 1;
+  const add = (col, val) => {
+    cols.push(col);
+    params.push(val);
+    idx += 1;
+  };
+
+  const outboxId = uuidv4();
+  if (schema.hasOutboxId) add('outbox_id', outboxId);
+  else if (schema.hasId) add('id', outboxId);
+
+  add('user_id', ownerUserId);
+  add('client_id', clientId);
+  add('transaction_uuid', transactionUuid);
+  if (transactionId != null) add('transaction_id', transactionId);
+  add(schema.phoneCol, clientPhone);
+  add('message_text', messageText);
+  add('status', 'pending');
+
+  if (schema.attemptsCol) add(schema.attemptsCol, 0);
+  if (schema.hasMaxTries) add('max_tries', Number(process.env.MAX_ATTEMPTS || 5));
+
+  // Some schemas require explicit scheduling columns; set to now if present.
+  if (schema.hasNextAttemptAt) add('next_attempt_at', new Date());
+  if (schema.hasNextRetryAt) add('next_retry_at', new Date());
+
+  const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
+  const sql = `INSERT INTO whatsapp_outbox (${cols.join(', ')}) VALUES (${placeholders})`;
+  await pool.query(sql, params);
+  return outboxId;
+}
 
 async function isUserWhatsappEnabled(userId) {
   try {
@@ -495,33 +578,19 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     feeCurrency: transaction.fee_currency
   });
 
-  const outboxId = uuidv4();
-
   try {
-    const maxTries = Number(process.env.MAX_ATTEMPTS || 5);
-    await pool.query(
-      `
-      INSERT INTO whatsapp_outbox (
-        id,
-        user_id,
-        client_id,
-        transaction_uuid,
-        transaction_id,
-        to_phone,
-        message_text,
-        status,
-        tries,
-        max_tries,
-        next_retry_at,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', 0, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `,
-      [outboxId, ownerUserId, clientId, tUuid, tId || null, clientPhone, msg, maxTries]
-    );
+    const outboxId = await insertOutboxRow({
+      ownerUserId,
+      clientId,
+      transactionUuid: tUuid,
+      transactionId: tId || null,
+      clientPhone,
+      messageText: msg
+    });
+    await ensureTransactionStatusRow(transaction);
+    return { enqueued: true, outboxId };
   } catch (e) {
     logger.warning('Failed to insert whatsapp_outbox (schema may differ)', {
-      outboxId,
       transactionUuid: tUuid,
       error: e?.message
     });
@@ -529,9 +598,6 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
     await ensureTransactionStatusRow(transaction);
     return { enqueued: false, reason: 'insert_failed' };
   }
-
-  await ensureTransactionStatusRow(transaction);
-  return { enqueued: true, outboxId };
 }
 
 module.exports = {
