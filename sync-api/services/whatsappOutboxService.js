@@ -272,6 +272,7 @@ function buildTransferMessage({
   currency,
   direction,
   dateValue,
+  balances,
   transferCompany,
   transferRecipient,
   transferSender,
