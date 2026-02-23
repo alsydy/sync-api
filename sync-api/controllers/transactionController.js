@@ -95,6 +95,8 @@ async function computeNotifyCustomer(ownerUserId, clientId) {
 const SHARED_ACCOUNT_ERROR = 'الحساب المشترك غير مدعوم. يرجى استخدام الصناديق الافتراضية الخاصة بك.';
 const ACCOUNT_OWNERSHIP_ERROR = 'الحساب لا يخص هذا المستخدم أو غير متاح.';
 const ACCOUNT_DELETED_ERROR = 'الحساب محذوف أو مؤرشف.';
+const CLIENT_OWNERSHIP_ERROR = 'العميل لا يخص هذا المستخدم أو غير متاح.';
+const CLIENT_DELETED_ERROR = 'العميل محذوف أو مؤرشف.';
 
 async function validateAccountForOwner(accountId, ownerUserId) {
   if (!accountId || !ownerUserId) {
@@ -133,6 +135,41 @@ async function validateAccountForOwner(accountId, ownerUserId) {
   } catch (error) {
     logger.warning('validateAccountForOwner failed', { accountId, ownerUserId, error: error.message });
     return { ok: false, error: ACCOUNT_OWNERSHIP_ERROR };
+  }
+}
+
+async function validateClientForOwner(clientId, ownerUserId) {
+  if (!clientId || !ownerUserId) {
+    return { ok: false, error: CLIENT_OWNERSHIP_ERROR };
+  }
+  const ownerIdNum = typeof ownerUserId === 'string' ? parseInt(ownerUserId, 10) : ownerUserId;
+  const clientIdNum = typeof clientId === 'string' ? parseInt(clientId, 10) : clientId;
+  if (!Number.isFinite(ownerIdNum) || !Number.isFinite(clientIdNum)) {
+    return { ok: false, error: CLIENT_OWNERSHIP_ERROR };
+  }
+  try {
+    const result = await pool.query(
+      'SELECT owner_user_id, deleted_at, is_archived FROM business_clients WHERE client_id = $1 LIMIT 1',
+      [clientIdNum]
+    );
+    if (result.rows.length === 0) {
+      return { ok: false, error: CLIENT_OWNERSHIP_ERROR };
+    }
+    const row = result.rows[0];
+    if (row.deleted_at || row.is_archived === true) {
+      return { ok: false, error: CLIENT_DELETED_ERROR };
+    }
+    const rowOwnerId =
+      typeof row.owner_user_id === 'string'
+        ? parseInt(row.owner_user_id, 10)
+        : row.owner_user_id;
+    if (!Number.isFinite(rowOwnerId) || rowOwnerId !== ownerIdNum) {
+      return { ok: false, error: CLIENT_OWNERSHIP_ERROR };
+    }
+    return { ok: true };
+  } catch (error) {
+    logger.warning('validateClientForOwner failed', { clientId, ownerUserId, error: error.message });
+    return { ok: false, error: CLIENT_OWNERSHIP_ERROR };
   }
 }
 
@@ -316,7 +353,8 @@ async function createTransaction(req, res, next) {
     }
     const clientId = await normalizeClientId(
       transactionData.customerId || transactionData.clientId,
-      transactionData.customerFirestoreId || transactionData.clientFirestoreId
+      transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+      ownerUserId
     );
     if (!clientId) {
       logValidationFailure(req, 'createTransaction: missing clientId', {
@@ -327,6 +365,16 @@ async function createTransaction(req, res, next) {
         success: false,
         error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
       });
+    }
+    const clientCheck = await validateClientForOwner(clientId, ownerUserId);
+    if (!clientCheck.ok) {
+      logValidationFailure(req, 'createTransaction: client ownership check failed', {
+        clientId,
+        ownerUserId,
+        customerFirestoreId: transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+        error: clientCheck.error
+      });
+      return res.status(400).json({ success: false, error: clientCheck.error });
     }
     let accountId = await normalizeAccountId(
       transactionData.accountId,
@@ -524,8 +572,30 @@ async function syncTransaction(req, res, next) {
       // الحصول على clientId الصحيح
       const clientId = await normalizeClientId(
         transactionData.customerId || transactionData.clientId,
-        transactionData.customerFirestoreId || transactionData.clientFirestoreId
+        transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+        ownerUserId
       );
+      if (!clientId) {
+        logValidationFailure(req, 'syncTransaction(update): missing clientId', {
+          customerId: transactionData.customerId || transactionData.clientId,
+          customerFirestoreId: transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+          ownerUserId
+        });
+        return res.status(400).json({
+          success: false,
+          error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
+        });
+      }
+      const clientCheck = await validateClientForOwner(clientId, ownerUserId);
+      if (!clientCheck.ok) {
+        logValidationFailure(req, 'syncTransaction(update): client ownership check failed', {
+          clientId,
+          ownerUserId,
+          customerFirestoreId: transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+          error: clientCheck.error
+        });
+        return res.status(400).json({ success: false, error: clientCheck.error });
+      }
 
       // الحصول على accountId الصحيح
       const accountId = await normalizeAccountId(
@@ -727,8 +797,30 @@ async function syncTransaction(req, res, next) {
 
       const clientId = await normalizeClientId(
         transactionData.customerId || transactionData.clientId,
-        transactionData.customerFirestoreId || transactionData.clientFirestoreId
+        transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+        ownerUserId
       );
+      if (!clientId) {
+        logValidationFailure(req, 'syncTransaction(insert): missing clientId', {
+          customerId: transactionData.customerId || transactionData.clientId,
+          customerFirestoreId: transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+          ownerUserId
+        });
+        return res.status(400).json({
+          success: false,
+          error: 'clientId مطلوب - لا يمكن العثور على العميل في قاعدة البيانات. يرجى التأكد من أن العميل مسجل في النظام.'
+        });
+      }
+      const clientCheck = await validateClientForOwner(clientId, ownerUserId);
+      if (!clientCheck.ok) {
+        logValidationFailure(req, 'syncTransaction(insert): client ownership check failed', {
+          clientId,
+          ownerUserId,
+          customerFirestoreId: transactionData.customerFirestoreId || transactionData.clientFirestoreId,
+          error: clientCheck.error
+        });
+        return res.status(400).json({ success: false, error: clientCheck.error });
+      }
 
       let accountId = await normalizeAccountId(
         transactionData.accountId,
