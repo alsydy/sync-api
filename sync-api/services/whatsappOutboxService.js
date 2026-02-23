@@ -275,8 +275,8 @@ function buildSimpleBalanceLineForCurrency(balances, currencyCode) {
   const raw = Number(row.balance);
   if (!Number.isFinite(raw)) return '';
   const absVal = formatAmountPretty(Math.abs(raw));
-  const status = raw > 0 ? 'لكم' : raw < 0 ? 'عليكم' : 'متزن';
-  return `الرصيد ${status}: ${absVal} ${currencyName(code)}`;
+  const label = raw > 0 ? 'الرصيد لكم' : raw < 0 ? 'الرصيد عليكم' : 'الرصيد متزن';
+  return `${label}: ${absVal} ${currencyName(code)}`;
 }
 
 function buildFeeOnlyRemittanceMessage({
