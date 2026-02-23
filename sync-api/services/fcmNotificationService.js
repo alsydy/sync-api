@@ -99,6 +99,19 @@ function buildBalanceLine(balance, currencyCode) {
   return `الرصيد: ${absVal} ${currencyName(currencyCode)} ${status}`;
 }
 
+function buildSimpleBalanceLine(balance, currencyCode) {
+  if (balance == null) return '';
+  const raw = Number(balance);
+  if (!Number.isFinite(raw)) return '';
+  const absVal = formatAmountPretty(Math.abs(raw));
+  const label = raw > 0
+    ? '\u0627\u0644\u0631\u0635\u064a\u062f \u0644\u0643\u0645'
+    : raw < 0
+      ? '\u0627\u0644\u0631\u0635\u064a\u062f \u0639\u0644\u064a\u0643\u0645'
+      : '\u0627\u0644\u0631\u0635\u064a\u062f \u0645\u062a\u0632\u0646';
+  return `${label}: ${absVal} ${currencyName(currencyCode)}`;
+}
+
 function isTransferEntry(tx) {
   const type = String(tx?.entry_type || '').toLowerCase();
   if (type.includes('transfer') || type.includes('remittance') || type.includes('حوال') || type.includes('hawala')) return true;
@@ -198,13 +211,6 @@ async function sendTransactionNotification(transaction, customer, owner) {
       return { success: false, reason: 'notify_customer_is_false' };
     }
 
-    if (isFeeOnlyRemittanceTransaction(transaction)) {
-      logger.debug('Transaction notification skipped: fee-only remittance', {
-        transactionUuid: transaction.transaction_uuid
-      });
-      return { success: false, reason: 'fee_only_remittance' };
-    }
-
     // جلب firebase_uid للعميل عبر رقم الهاتف فقط (لا نستخدم owner.firebase_uid نهائياً)
     const customerUser = await pool.query(
       `SELECT firebase_uid
@@ -263,10 +269,29 @@ async function sendTransactionNotification(transaction, customer, owner) {
 
     let notificationTitle = `قيد جديد من ${ownerName}`;
     let notificationBody = `${isDebit ? 'مدين' : 'دائن'}: ${amount} ${currency}${transaction.transaction_note ? ` - ${transaction.transaction_note}` : ''}`;
+    if (isFeeOnlyRemittanceTransaction(transaction)) {
+      const amountText = formatAmountPretty(amount);
+      const number = transaction.transfer_number || '0';
+      const dateLine = formatDateTime(transaction.transaction_date || transaction.created_at || Date.now());
+      notificationTitle = '\u062a\u0645 \u062e\u0635\u0645 \u0639\u0645\u0648\u0644\u0629 \u062d\u0648\u0627\u0644\u0629';
+      notificationBody = [
+        `\u062a\u0645 \u062e\u0635\u0645 ${amountText} ${currencyName(currency)} \u0645\u0642\u0627\u0628\u0644 \u0639\u0645\u0648\u0644\u0629 \u062a\u0633\u0644\u064a\u0645 \u062d\u0648\u0627\u0644\u0629 \u0631\u0642\u0645 ${number}`,
+        '',
+        dateLine
+      ].join('\n');
 
-    if (isTransferEntry(transaction)) {
+      const balanceVal = await getClientBalanceForCurrency(
+        transaction.owner_user_id,
+        transaction.client_id,
+        currency
+      );
+      const balanceLine = buildSimpleBalanceLine(balanceVal, currency);
+      if (balanceLine) {
+        notificationBody = `${notificationBody}\n\n${balanceLine}`;
+      }
+    } else if (isTransferEntry(transaction)) {
       const isSend = isDebit;
-      notificationTitle = isSend ? '(إرسال حوالة)' : '(إستلام حوالة)';
+      notificationTitle = isSend ? '(\u0625\u0631\u0633\u0627\u0644 \u062d\u0648\u0627\u0644\u0629)' : '(\u0625\u0633\u062a\u0644\u0627\u0645 \u062d\u0648\u0627\u0644\u0629)';
 
       const feeAmount = Number(transaction.fee_amount);
       const feeCurrency = String(transaction.fee_currency || '').toUpperCase();
@@ -281,28 +306,32 @@ async function sendTransactionNotification(transaction, customer, owner) {
       const amountText = formatAmountPretty(displayAmount);
       const feeText = formatAmountPretty(feeAmount);
 
-      const firstLine =
-        (isSend ? 'عليكم حوالة' : 'لكم حوالة') +
-        ` ${amountText} ${currencyName(currency)}` +
-        (hasFee ? `  العمولة: ${feeText} ${currencyName(feeCurrency || currency)}` : '');
+      const feeSegment = (isSend && hasFee)
+        ? `  \u0627\u0644\u0639\u0645\u0648\u0644\u0629: ${feeText} ${currencyName(feeCurrency || currency)}`
+        : '';
 
-      const company = transaction.transfer_company || 'غير محدد';
-      const recipient = transaction.transfer_recipient || 'غير محدد';
-      const sender = transaction.transfer_sender || 'غير محدد';
-      const number = transaction.transfer_number || 'غير محدد';
+      const firstLine =
+        (isSend ? '\u0639\u0644\u064a\u0643\u0645 \u062d\u0648\u0627\u0644\u0629' : '\u0644\u0643\u0645 \u062d\u0648\u0627\u0644\u0629') +
+        ` ${amountText} ${currencyName(currency)}` +
+        feeSegment;
+
+      const company = transaction.transfer_company || '\u063a\u064a\u0631 \u0645\u062d\u062f\u062f';
+      const recipient = transaction.transfer_recipient || '\u063a\u064a\u0631 \u0645\u062d\u062f\u062f';
+      const sender = transaction.transfer_sender || '\u063a\u064a\u0631 \u0645\u062d\u062f\u062f';
+      const number = transaction.transfer_number || '\u063a\u064a\u0631 \u0645\u062d\u062f\u062f';
       const dateLine = formatDateTime(transaction.transaction_date || transaction.created_at || Date.now());
-      const advisory = isSend ? '\nعميلنا العزيز عند إرسالك حوالة احرص \nعلى إبلاغ المستفيد باستلامها' : '';
+      const advisory = isSend ? '\n\u0639\u0645\u064a\u0644\u0646\u0627 \u0627\u0644\u0639\u0632\u064a\u0632 \u0639\u0646\u062f \u0625\u0631\u0633\u0627\u0644\u0643 \u062d\u0648\u0627\u0644\u0629 \u0627\u062d\u0631\u0635 \n\u0639\u0644\u0649 \u0625\u0628\u0644\u0627\u063a \u0627\u0644\u0645\u0633\u062a\u0641\u064a\u062f \u0628\u0627\u0633\u062a\u0644\u0627\u0645\u0647\u0627' : '';
 
       notificationBody = [
         notificationTitle,
         firstLine,
         '',
-        `مقابل ${isSend ? 'تحويل حوالة من حسابكم لدينا إلى' : 'حوالة واردة عن طريق'}: ${company}`,
-        `مبلغ الحوالة: ${amountText}`,
-        `عملة الحوالة: ${currencyName(currency)}`,
-        `المستلم: ${recipient}`,
-        `المرسل: ${sender}`,
-        `رقم الحوالة: ${number}`,
+        `\u0645\u0642\u0627\u0628\u0644 ${isSend ? '\u062a\u062d\u0648\u064a\u0644 \u062d\u0648\u0627\u0644\u0629 \u0645\u0646 \u062d\u0633\u0627\u0628\u0643\u0645 \u0644\u062f\u064a\u0646\u0627 \u0625\u0644\u0649' : '\u062d\u0648\u0627\u0644\u0629 \u0648\u0627\u0631\u062f\u0629 \u0639\u0646 \u0637\u0631\u064a\u0642'}: ${company}`,
+        `\u0645\u0628\u0644\u063a \u0627\u0644\u062d\u0648\u0627\u0644\u0629: ${amountText}`,
+        `\u0639\u0645\u0644\u0629 \u0627\u0644\u062d\u0648\u0627\u0644\u0629: ${currencyName(currency)}`,
+        `\u0627\u0644\u0645\u0633\u062a\u0644\u0645: ${recipient}`,
+        `\u0627\u0644\u0645\u0631\u0633\u0644: ${sender}`,
+        `\u0631\u0642\u0645 \u0627\u0644\u062d\u0648\u0627\u0644\u0629: ${number}`,
         '',
         `${dateLine}${advisory}`
       ].join('\n');
@@ -312,13 +341,14 @@ async function sendTransactionNotification(transaction, customer, owner) {
         transaction.client_id,
         currency
       );
-      const balanceLine = buildBalanceLine(balanceVal, currency);
+      const balanceLine = isSend
+        ? buildBalanceLine(balanceVal, currency)
+        : buildSimpleBalanceLine(balanceVal, currency);
       if (balanceLine) {
         notificationBody = `${notificationBody}\n\n${balanceLine}`;
       }
     }
-    
-    const message = {
+const message = {
       notification: {
         title: notificationTitle,
         body: notificationBody
