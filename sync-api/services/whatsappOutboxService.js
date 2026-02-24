@@ -542,14 +542,36 @@ async function getOwnerName(userId) {
 
 async function getClientBalances(ownerUserId, clientId) {
   try {
+    const view = await pool.query(
+      `
+      SELECT currency_code, balance
+      FROM client_balances
+      WHERE owner_user_id = $1
+        AND client_id = $2
+      ORDER BY currency_code
+      `,
+      [ownerUserId, clientId]
+    );
+    if (view.rows && view.rows.length > 0) {
+      return view.rows.map((row) => ({
+        currency: row.currency_code,
+        balance: row.balance
+      }));
+    }
+  } catch (e) {
+    if (e?.code !== '42P01') {
+      logger.warning('Client balances view lookup failed', { ownerUserId, clientId, error: e?.message });
+    }
+  }
+  try {
     const r = await pool.query(
       `
       SELECT
         currency_code,
         SUM(
           CASE
-            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -transaction_amount
-            ELSE transaction_amount
+            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -ABS(transaction_amount)
+            ELSE ABS(transaction_amount)
           END
         ) AS balance
       FROM financial_transactions
