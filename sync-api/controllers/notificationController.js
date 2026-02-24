@@ -5,22 +5,106 @@
 // ============================================================================
 
 const { sendNotificationToUser } = require('../services/fcmNotificationService');
+const { pool } = require('../config/database');
+const { normalizeClientId } = require('../utils/helpers');
 const logger = require('../utils/logger');
 
 /**
  * POST /api/notifications/send
  * إرسال إشعار إلى مستخدم حسب firebaseUid (يُستدعى من التطبيق عند إضافة قيد مع إشعار العميل)
- * Body: { firebaseUid, title, body, type?, data? }
+ * Body: { firebaseUid, title, body, type?, data?, ownerUserId?, clientId?, clientEntryId?, clientFirestoreId? }
  */
 async function sendNotification(req, res, next) {
   try {
-    const { firebaseUid, title, body, type = 'transaction', data = {} } = req.body || {};
+    const {
+      firebaseUid,
+      title,
+      body,
+      type = 'transaction',
+      data = {},
+      ownerUserId: bodyOwnerUserId,
+      clientId: bodyClientId,
+      clientEntryId: bodyClientEntryId,
+      clientFirestoreId: bodyClientFirestoreId,
+      clientUuid: bodyClientUuid
+    } = req.body || {};
 
     if (!firebaseUid || !title || !body) {
       return res.status(400).json({
         success: false,
         error: 'firebaseUid و title و body مطلوبة'
       });
+    }
+
+    const authUserId = req?.user?.userId || req?.user?.user_id || null;
+    const rawOwnerUserId = authUserId ?? bodyOwnerUserId ?? data?.ownerUserId ?? data?.owner_user_id ?? null;
+    const ownerUserId = rawOwnerUserId != null && Number.isFinite(Number(rawOwnerUserId))
+      ? Number(rawOwnerUserId)
+      : null;
+
+    const rawClientId = bodyClientId ?? data?.clientId ?? data?.client_id ?? null;
+    const rawClientRef =
+      bodyClientEntryId ||
+      bodyClientUuid ||
+      bodyClientFirestoreId ||
+      data?.clientEntryId ||
+      data?.clientUuid ||
+      data?.clientFirestoreId ||
+      data?.client_firestore_id ||
+      data?.clientEntry ||
+      null;
+
+    if (type === 'transaction' && firebaseUid) {
+      try {
+        const u = await pool.query(
+          'SELECT receive_transaction_notifications FROM app_users WHERE firebase_uid = $1 LIMIT 1',
+          [firebaseUid]
+        );
+        if (u.rows.length > 0 && u.rows[0]?.receive_transaction_notifications === false) {
+          logger.info('Notification skipped: receiver disabled transaction notifications', {
+            firebaseUid
+          });
+          return res.json({ success: true, skipped: true, reason: 'receiver_disabled' });
+        }
+      } catch (e) {
+        logger.warning('Failed to check receiver notification settings', {
+          firebaseUid,
+          error: e?.message
+        });
+      }
+    }
+
+    if (type === 'transaction' && ownerUserId && (rawClientId || rawClientRef)) {
+      try {
+        const clientId = await normalizeClientId(rawClientId, rawClientRef, ownerUserId);
+        if (clientId) {
+          const o = await pool.query(
+            'SELECT 1 FROM whatsapp_client_opt_out WHERE user_id = $1 AND client_id = $2 LIMIT 1',
+            [ownerUserId, clientId]
+          );
+          if (o.rows.length > 0) {
+            logger.info('Notification skipped: client opted out', {
+              ownerUserId,
+              clientId,
+              firebaseUid
+            });
+            return res.json({ success: true, skipped: true, reason: 'client_opted_out' });
+          }
+        } else {
+          logger.debug('Notification opt-out check skipped: clientId unresolved', {
+            ownerUserId,
+            rawClientId,
+            rawClientRef
+          });
+        }
+      } catch (e) {
+        logger.warning('Notification opt-out check failed', {
+          ownerUserId,
+          rawClientId,
+          rawClientRef,
+          error: e?.message
+        });
+      }
     }
 
     const result = await sendNotificationToUser(firebaseUid, title, body, type, data);
