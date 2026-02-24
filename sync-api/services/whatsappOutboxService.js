@@ -37,7 +37,11 @@ async function getOutboxSchema() {
       attemptsCol: has('attempts') ? 'attempts' : (has('tries') ? 'tries' : null),
       hasMaxTries: has('max_tries'),
       hasNextAttemptAt: has('next_attempt_at'),
-      hasNextRetryAt: has('next_retry_at')
+      hasNextRetryAt: has('next_retry_at'),
+      hasLockedAt: has('locked_at'),
+      hasLockedBy: has('locked_by'),
+      hasProcessingStartedAt: has('processing_started_at'),
+      hasLastError: has('last_error')
     };
     outboxSchemaCacheAt = now;
     return outboxSchemaCache;
@@ -141,6 +145,48 @@ function formatDate(d) {
     return `${dd}/${mm}/${yyyy}`;
   } catch (_) {
     return 'غير محدد';
+  }
+}
+
+async function cancelPendingOutboxForClient(userId, clientId, reason = 'client_opted_out') {
+  if (!userId || !clientId) return { updated: 0 };
+  const schema = await getOutboxSchema();
+  if (!schema) return { updated: 0 };
+
+  const updates = ['status = $3', 'updated_at = CURRENT_TIMESTAMP'];
+  const params = [userId, clientId, 'skipped'];
+  let idx = 4;
+
+  if (schema.hasLastError && reason) {
+    updates.push(`last_error = $${idx++}`);
+    params.push(String(reason).slice(0, 2000));
+  }
+
+  if (schema.hasLockedAt) updates.push('locked_at = NULL');
+  if (schema.hasLockedBy) updates.push('locked_by = NULL');
+  if (schema.hasProcessingStartedAt) updates.push('processing_started_at = NULL');
+  if (schema.hasNextAttemptAt) updates.push('next_attempt_at = CURRENT_TIMESTAMP');
+  if (schema.hasNextRetryAt) updates.push('next_retry_at = CURRENT_TIMESTAMP');
+
+  try {
+    const r = await pool.query(
+      `
+      UPDATE whatsapp_outbox
+      SET ${updates.join(', ')}
+      WHERE user_id = $1
+        AND client_id = $2
+        AND status IN ('pending', 'retry', 'processing')
+      `,
+      params
+    );
+    return { updated: r.rowCount || 0 };
+  } catch (e) {
+    logger.warning('Failed to cancel pending WhatsApp outbox', {
+      userId,
+      clientId,
+      error: e?.message
+    });
+    return { updated: 0 };
   }
 }
 
@@ -673,5 +719,6 @@ async function enqueueWhatsAppOutboxForTransaction(transaction) {
 }
 
 module.exports = {
-  enqueueWhatsAppOutboxForTransaction
+  enqueueWhatsAppOutboxForTransaction,
+  cancelPendingOutboxForClient
 };
