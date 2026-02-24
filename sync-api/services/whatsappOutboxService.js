@@ -279,7 +279,12 @@ function isFeeOnlyRemittanceTransaction(tx) {
   const feeNum = Number(tx?.fee_amount ?? tx?.feeAmount);
   const hasFee = Number.isFinite(feeNum) && feeNum > 0;
   const amountIsZero = !Number.isFinite(amountNum) || amountNum <= 0;
-  return hasFeeHint || (hasFee && amountIsZero);
+  const isFeeSameAsAmount =
+    Number.isFinite(amountNum) &&
+    Number.isFinite(feeNum) &&
+    feeNum > 0 &&
+    Math.abs(amountNum - feeNum) < 0.000001;
+  return hasFeeHint || (hasFee && amountIsZero) || isFeeSameAsAmount;
 }
 
 function computeTransferDisplayAmount({ amount, currency, feeAmount, feeCurrency, direction }) {
