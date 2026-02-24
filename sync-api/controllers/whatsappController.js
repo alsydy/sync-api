@@ -7,6 +7,8 @@
 const crypto = require('crypto');
 const { pool } = require('../config/database');
 const logger = require('../utils/logger');
+const { normalizeClientId } = require('../utils/helpers');
+const { cancelPendingOutboxForClient } = require('../services/whatsappOutboxService');
 
 function sha256Hex(input) {
   return crypto.createHash('sha256').update(String(input), 'utf8').digest('hex');
@@ -108,7 +110,7 @@ async function upsertWhatsappSettings(req, res, next) {
 
 /**
  * PUT /api/whatsapp/client-opt-out
- * Body: { user_id, client_id, opted_out }
+ * Body: { user_id, client_id?, client_uuid?/client_firestore_id?, opted_out }
  */
 async function setClientOptOut(req, res, next) {
   try {
@@ -117,8 +119,34 @@ async function setClientOptOut(req, res, next) {
     }
     const body = req.body || {};
     const userId = resolveUserId(req, body.user_id, 'user_id');
-    const clientId = requireInt(body.client_id, 'client_id');
     const optedOut = requireBoolean(body.opted_out, 'opted_out');
+    const clientRef =
+      body.client_uuid ||
+      body.clientUuid ||
+      body.client_entry_id ||
+      body.clientEntryId ||
+      body.entry_id ||
+      body.entryId ||
+      body.client_firestore_id ||
+      body.clientFirestoreId ||
+      body.firestore_id ||
+      body.firestoreId ||
+      null;
+
+    if (body.client_id == null && !clientRef) {
+      return res.status(400).json({
+        success: false,
+        error: 'client_id أو client_uuid مطلوب'
+      });
+    }
+
+    const clientId = await normalizeClientId(body.client_id, clientRef, userId);
+    if (!clientId) {
+      return res.status(404).json({
+        success: false,
+        error: 'لم يتم العثور على العميل لهذا المستخدم'
+      });
+    }
 
     // تصميم متسامح: إن كان opted_out = false نحذف السجل إن كان موجوداً
     if (!optedOut) {
@@ -158,6 +186,11 @@ async function setClientOptOut(req, res, next) {
       }
     }
 
+    // ✅ Cancel any pending outbox entries so they won't be sent after re-enable
+    try {
+      await cancelPendingOutboxForClient(userId, clientId, 'client_opted_out');
+    } catch (_) {}
+
     res.json({ success: true, data: { userId, clientId, optedOut: true } });
   } catch (error) {
     next(error);
@@ -167,6 +200,7 @@ async function setClientOptOut(req, res, next) {
 /**
  * GET /api/whatsapp/client-opt-out/:userId
  * Returns list of opted-out clientIds for user
+ * Optional: ?format=uuid to return client entryIds (client_uuid/firestore_id)
  */
 async function getClientOptOuts(req, res, next) {
   try {
@@ -174,6 +208,42 @@ async function getClientOptOuts(req, res, next) {
       logger.info('WA auth debug', { authUser: req.user, param: req.params, body: req.body });
     }
     const userId = resolveUserId(req, req.params.userId, 'userId');
+    const format = String(req.query.format || '').toLowerCase();
+
+    if (format === 'uuid' || format === 'entryid' || format === 'entry_id') {
+      try {
+        const r = await pool.query(
+          `
+          SELECT bc.client_uuid, bc.firestore_id
+          FROM whatsapp_client_opt_out w
+          JOIN business_clients bc ON bc.client_id = w.client_id
+          WHERE w.user_id = $1
+            AND bc.owner_user_id = $1
+            AND bc.deleted_at IS NULL
+          `,
+          [userId]
+        );
+        const ids = (r.rows || [])
+          .map((row) => row.client_uuid || row.firestore_id)
+          .filter((v) => v)
+          .map((v) => String(v));
+        return res.json({ success: true, data: ids });
+      } catch (e) {
+        logger.warning('Failed to load client opt-out UUIDs; falling back to client_id list', {
+          userId,
+          error: e?.message
+        });
+        const rFallback = await pool.query(
+          'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1',
+          [userId]
+        );
+        const idsFallback = (rFallback.rows || [])
+          .map((x) => String(x.client_id))
+          .filter((x) => x);
+        return res.json({ success: true, data: idsFallback });
+      }
+    }
+
     // Schema in your DB has no opted_out/is_opted_out; presence of a row means opted-out.
     const r = await pool.query(
       'SELECT client_id FROM whatsapp_client_opt_out WHERE user_id = $1',
