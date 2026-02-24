@@ -70,7 +70,7 @@ async function getClientBalanceForCurrency(ownerUserId, clientId, currencyCode) 
       SELECT
         SUM(
           CASE
-            WHEN transaction_direction IN ('expense','debit','DEBIT') THEN -transaction_amount
+            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -transaction_amount
             ELSE transaction_amount
           END
         ) AS balance
@@ -112,6 +112,14 @@ function buildSimpleBalanceLine(balance, currencyCode) {
   return `${label}: ${absVal} ${currencyName(currencyCode)}`;
 }
 
+function inferFeeLabel(note) {
+  const n = String(note || '');
+  if (n.includes('?????')) return '????? ?????';
+  if (n.includes('?????')) return '????? ?????';
+  return '????? ?????';
+}
+
+
 function isTransferEntry(tx) {
   const type = String(tx?.entry_type || '').toLowerCase();
   if (type.includes('transfer') || type.includes('remittance') || type.includes('حوال') || type.includes('hawala')) return true;
@@ -120,16 +128,25 @@ function isTransferEntry(tx) {
 
 function isFeeOnlyRemittanceTransaction(tx) {
   const type = String(tx?.entry_type || '').toLowerCase();
-  if (!(type.includes('transfer') || type.includes('remittance') || type.includes('hawala') || type.includes('حوال'))) {
+  if (!(type.includes('transfer') || type.includes('remittance') || type.includes('hawala') || type.includes('????'))) {
     return false;
   }
   const dir = String(tx?.transaction_direction || '').toLowerCase();
   const isDebit = dir === 'expense' || dir === 'debit';
   if (!isDebit) return false;
   const note = String(tx?.transaction_note || '');
-  const feeHints = ['خدمة تحويل', 'عمولة تحويل', 'عمولة تسليم', 'خدمة تسليم'];
+  const feeHints = ['???? ?????', '????? ?????', '????? ?????', '???? ?????'];
   const hasFeeHint = feeHints.some((hint) => note.includes(hint)) || note.toLowerCase().includes('fee');
-  return hasFeeHint;
+  const amountNum = Number(tx?.transaction_amount ?? tx?.amount);
+  const feeNum = Number(tx?.fee_amount ?? tx?.feeAmount);
+  const hasFee = Number.isFinite(feeNum) && feeNum > 0;
+  const amountIsZero = !Number.isFinite(amountNum) || amountNum <= 0;
+  const isFeeSameAsAmount =
+    Number.isFinite(amountNum) &&
+    Number.isFinite(feeNum) &&
+    feeNum > 0 &&
+    Math.abs(amountNum - feeNum) < 0.000001;
+  return hasFeeHint || (hasFee && amountIsZero) || isFeeSameAsAmount;
 }
 
 function computeTransferDisplayAmount({ amount, currency, feeAmount, feeCurrency, direction }) {
@@ -270,14 +287,16 @@ async function sendTransactionNotification(transaction, customer, owner) {
     let notificationTitle = `قيد جديد من ${ownerName}`;
     let notificationBody = `${isDebit ? 'مدين' : 'دائن'}: ${amount} ${currency}${transaction.transaction_note ? ` - ${transaction.transaction_note}` : ''}`;
     if (isFeeOnlyRemittanceTransaction(transaction)) {
-      const amountText = formatAmountPretty(amount);
+      const feeNum = Number(transaction.fee_amount);
+      const amountNum = Number(transaction.transaction_amount);
+      const displayAmount = Number.isFinite(feeNum) && feeNum > 0 ? feeNum : (Number.isFinite(amountNum) ? amountNum : 0);
+      const amountText = formatAmountPretty(displayAmount);
       const number = transaction.transfer_number || '0';
-      const dateLine = formatDateTime(transaction.transaction_date || transaction.created_at || Date.now());
-      notificationTitle = '\u062a\u0645 \u062e\u0635\u0645 \u0639\u0645\u0648\u0644\u0629 \u062d\u0648\u0627\u0644\u0629';
+            const feeLabel = inferFeeLabel(transaction.transaction_note || '');
+      notificationTitle = 'خصم عمولة حوالة';
       notificationBody = [
-        `\u062a\u0645 \u062e\u0635\u0645 ${amountText} ${currencyName(currency)} \u0645\u0642\u0627\u0628\u0644 \u0639\u0645\u0648\u0644\u0629 \u062a\u0633\u0644\u064a\u0645 \u062d\u0648\u0627\u0644\u0629 \u0631\u0642\u0645 ${number}`,
-        '',
-        dateLine
+        `عليكم خصم ${amountText} ${currencyName(currency)}`,
+        `تم خصم ${feeLabel} حوالة رقم الحوالة: ${number}`,
       ].join('\n');
 
       const balanceVal = await getClientBalanceForCurrency(
@@ -285,7 +304,7 @@ async function sendTransactionNotification(transaction, customer, owner) {
         transaction.client_id,
         currency
       );
-      const balanceLine = buildSimpleBalanceLine(balanceVal, currency);
+      const balanceLine = buildBalanceLine(balanceVal, currency);
       if (balanceLine) {
         notificationBody = `${notificationBody}\n\n${balanceLine}`;
       }
