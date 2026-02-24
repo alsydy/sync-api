@@ -548,7 +548,7 @@ async function getClientBalances(ownerUserId, clientId) {
         currency_code,
         SUM(
           CASE
-            WHEN transaction_direction IN ('expense','debit','DEBIT') THEN -transaction_amount
+            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -transaction_amount
             ELSE transaction_amount
           END
         ) AS balance
