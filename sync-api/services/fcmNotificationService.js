@@ -65,13 +65,34 @@ function formatDateTime(d) {
 async function getClientBalanceForCurrency(ownerUserId, clientId, currencyCode) {
   try {
     if (!ownerUserId || !clientId || !currencyCode) return null;
+    const view = await pool.query(
+      `
+      SELECT balance
+      FROM client_balances
+      WHERE owner_user_id = $1
+        AND client_id = $2
+        AND currency_code = $3
+      LIMIT 1
+      `,
+      [ownerUserId, clientId, currencyCode]
+    );
+    if (view.rows && view.rows.length > 0) {
+      const rawView = Number(view.rows?.[0]?.balance);
+      return Number.isFinite(rawView) ? rawView : null;
+    }
+  } catch (e) {
+    if (e?.code !== '42P01') {
+      logger.warning('Client balance view lookup failed', { ownerUserId, clientId, currencyCode, error: e?.message });
+    }
+  }
+  try {
     const r = await pool.query(
       `
       SELECT
         SUM(
           CASE
-            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -transaction_amount
-            ELSE transaction_amount
+            WHEN LOWER(transaction_direction) IN ('expense','debit') THEN -ABS(transaction_amount)
+            ELSE ABS(transaction_amount)
           END
         ) AS balance
       FROM financial_transactions
